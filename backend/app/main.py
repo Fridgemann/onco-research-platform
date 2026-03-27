@@ -6,7 +6,7 @@ import sys
 
 from app.core.config import settings
 from app.core.rate_limit import limiter, rate_limit_exceeded_handler
-from app.api.routes import auth
+from app.api.routes import auth, workspace
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -33,6 +33,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router, prefix="/api")
+app.include_router(workspace.router, prefix="/api")
 
 
 @app.get("/health")

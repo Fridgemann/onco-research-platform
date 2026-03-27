@@ -11,6 +11,7 @@ from alembic import context
 from app.core.database import Base
 from app.models.user import User
 from app.models.audit_log import AuditLog
+from app.models.workspace import Workspace, WorkspaceMember
 from app.core.config import settings
 
 config = context.config
