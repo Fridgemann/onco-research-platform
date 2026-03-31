@@ -9,6 +9,7 @@ from app.models.audit_log import AuditAction
 from app.schemas.workspace import WorkspaceCreate, WorkspaceUpdate, WorkspaceResponse
 from app.services.audit import write_audit_log
 from app.api.dependencies import CurrentUser
+from app.models.user import User
 
 router = APIRouter(prefix="/workspaces", tags=["Workspaces"])
 
@@ -21,7 +22,7 @@ async def _get_workspace_or_404(workspace_id: str, db: AsyncSession) -> Workspac
     return workspace
 
 
-async def _require_owner(workspace: Workspace, current_user: CurrentUser) -> None:
+async def _require_owner(workspace: Workspace, current_user: User) -> None:
     if workspace.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the workspace owner can perform this action.")
 
@@ -112,7 +113,7 @@ async def update_workspace(
         workspace.description = body.description
 
     await write_audit_log(
-        db, AuditAction.WORKSPACE_CREATED,  # reusing closest action — no workspace_updated in enum yet
+        db, AuditAction.WORKSPACE_UPDATED,
         user_id=current_user.id,
         resource_type="workspace",
         resource_id=workspace.id,
