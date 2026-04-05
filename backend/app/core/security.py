@@ -54,3 +54,11 @@ def encrypt_field(value: str) -> str:
 
 def decrypt_field(value: str) -> str:
     return _fernet.decrypt(value.encode()).decode()
+
+
+def encrypt_bytes(data: bytes) -> bytes:
+    return _fernet.encrypt(data)
+
+
+def decrypt_bytes(data: bytes) -> bytes:
+    return _fernet.decrypt(data)
