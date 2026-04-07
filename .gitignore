@@ -6,3 +6,4 @@ backend/alembic/versions/__pycache__/
 *.pyc
 *.pyo
 .DS_Store
+.claude/settings.local.json
