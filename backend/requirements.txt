@@ -10,6 +10,10 @@ pydantic-settings==2.2.1
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
+pandas==2.2.2
+numpy==1.26.4
+scipy==1.13.0
+lifelines==0.29.0
 cryptography==42.0.7
 python-multipart==0.0.9
 slowapi==0.1.9

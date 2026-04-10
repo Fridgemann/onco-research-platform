@@ -1,0 +1,146 @@
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.dependencies import CurrentUser
+from app.models.audit_log import AuditAction
+from app.core.database import get_db
+from app.models.analysis_job import AnalysisJob
+from app.models.dataset import Dataset, DatasetStatus
+from app.models.workspace import WorkspaceMember
+from app.schemas.analysis import AnalysisJobCreate, AnalysisJobResponse
+from app.services.audit import write_audit_log
+from app.tasks.analysis import run_analysis_task
+
+router = APIRouter(prefix="/workspaces/{workspace_id}/datasets/{dataset_id}/analysis", tags=["analysis"])
+jobs_router = APIRouter(prefix="/analysis", tags=["analysis"])
+
+
+async def _get_dataset_or_404(
+    workspace_id: str,
+    dataset_id: str,
+    user_id: str,
+    db: AsyncSession,
+) -> Dataset:
+    member = await db.scalar(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == user_id,
+        )
+    )
+    if not member:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a workspace member")
+
+    dataset = await db.scalar(
+        select(Dataset).where(
+            Dataset.id == dataset_id,
+            Dataset.workspace_id == workspace_id,
+            Dataset.is_deleted == False,
+        )
+    )
+    if not dataset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
+
+    return dataset
+
+
+def _job_to_response(job: AnalysisJob) -> AnalysisJobResponse:
+    return AnalysisJobResponse(
+        id=job.id,
+        dataset_id=job.dataset_id,
+        workspace_id=job.workspace_id,
+        requested_by=job.requested_by,
+        job_type=job.job_type,
+        status=job.status,
+        parameters=json.loads(job.parameters) if job.parameters else None,
+        result=json.loads(job.result) if job.result else None,
+        error_message=job.error_message,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        created_at=job.created_at,
+    )
+
+
+@router.post("", response_model=AnalysisJobResponse, status_code=status.HTTP_202_ACCEPTED)
+async def submit_analysis_job(
+    workspace_id: str,
+    dataset_id: str,
+    body: AnalysisJobCreate,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    dataset = await _get_dataset_or_404(workspace_id, dataset_id, current_user.id, db)
+
+    job = AnalysisJob(
+        dataset_id=dataset.id,
+        workspace_id=workspace_id,
+        requested_by=current_user.id,
+        job_type=body.job_type,
+        parameters=json.dumps(body.parameters or {}),
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    await write_audit_log(
+        db,
+        action=AuditAction.ANALYSIS_STARTED,
+        user_id=current_user.id,
+        resource_type="analysis_job",
+        resource_id=job.id,
+        detail=f"job_type={job.job_type} dataset_id={dataset_id}",
+    )
+
+    run_analysis_task.delay(job.id)
+
+    return _job_to_response(job)
+
+
+@jobs_router.get("/{job_id}", response_model=AnalysisJobResponse)
+async def get_analysis_job(
+    job_id: str,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    job = await db.scalar(select(AnalysisJob).where(AnalysisJob.id == job_id))
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    member = await db.scalar(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == job.workspace_id,
+            WorkspaceMember.user_id == current_user.id,
+        )
+    )
+    if not member:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a workspace member")
+
+    return _job_to_response(job)
+
+
+@jobs_router.get("", response_model=list[AnalysisJobResponse])
+async def list_analysis_jobs(
+    workspace_id: str,  # query param: GET /api/analysis?workspace_id=xxx
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    member = await db.scalar(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == current_user.id,
+        )
+    )
+    if not member:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a workspace member")
+
+    jobs = (
+        await db.scalars(
+            select(AnalysisJob)
+            .where(AnalysisJob.workspace_id == workspace_id)
+            .order_by(AnalysisJob.created_at.desc())
+        )
+    ).all()
+
+    return [_job_to_response(j) for j in jobs]

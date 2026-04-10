@@ -7,6 +7,7 @@ import sys
 from app.core.config import settings
 from app.core.rate_limit import limiter, rate_limit_exceeded_handler
 from app.api.routes import auth, workspace, invite, dataset
+from app.api.routes.analysis import router as analysis_router, jobs_router
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -37,6 +38,8 @@ app.include_router(workspace.router, prefix="/api")
 app.include_router(invite.workspace_invite_router, prefix="/api")
 app.include_router(invite.invite_router, prefix="/api")
 app.include_router(dataset.router, prefix="/api")
+app.include_router(analysis_router, prefix="/api")
+app.include_router(jobs_router, prefix="/api")
 
 
 @app.get("/health")
