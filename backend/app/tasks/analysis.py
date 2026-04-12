@@ -100,11 +100,13 @@ def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
     event_col = params["event_column"]
     group_col = params.get("group_column")
 
+    event_value = params.get("event_value")  # e.g. 2 for R convention (1=censored, 2=dead)
     df_clean = df[[time_col, event_col, group_col] if group_col else [time_col, event_col]].dropna()
+    event_observed = (df_clean[event_col] == event_value) if event_value is not None else df_clean[event_col]
 
     if not group_col:
         kmf = KaplanMeierFitter()
-        kmf.fit(durations=df_clean[time_col], event_observed=df_clean[event_col])
+        kmf.fit(durations=df_clean[time_col], event_observed=event_observed)
         return {
             "overall": {
                 "timeline": kmf.survival_function_.index.tolist(),
@@ -115,8 +117,9 @@ def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
     result = {}
     for group in df_clean[group_col].unique():
         subset = df_clean[df_clean[group_col] == group]
+        sub_events = (subset[event_col] == event_value) if event_value is not None else subset[event_col]
         kmf = KaplanMeierFitter()
-        kmf.fit(durations=subset[time_col], event_observed=subset[event_col])
+        kmf.fit(durations=subset[time_col], event_observed=sub_events)
         result[str(group)] = {
             "timeline": kmf.survival_function_.index.tolist(),
             "survival_probability": kmf.survival_function_["KM_estimate"].tolist(),
