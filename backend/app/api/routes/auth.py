@@ -55,7 +55,10 @@ async def register(
 
     existing = await db.execute(select(User).where(User.email_hash == email_hash))
     if existing.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="Email already registered.")
+        raise HTTPException(
+            status_code=409,
+            detail="If this email is not already registered, an account has been created.",
+        )
 
     user = User(
         email_encrypted=encrypt_field(body.email.lower()),
@@ -104,10 +107,7 @@ async def login(
             db, AuditAction.LOGIN_FAILED, user_id=user.id,
             status="failed", detail="Account locked", request=request,
         )
-        raise HTTPException(
-            status_code=403,
-            detail=f"Account locked. Try again after {user.locked_until.isoformat()}.",
-        )
+        raise auth_error  # generic 401 — don't confirm the account exists
 
     if not verify_password(body.password, user.hashed_password):
         user.failed_login_attempts += 1
@@ -156,6 +156,7 @@ async def login(
 @limiter.limit("20/minute")
 async def refresh_token(
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ):
     refresh_token = request.cookies.get("refresh_token")
@@ -174,8 +175,18 @@ async def refresh_token(
         raise HTTPException(status_code=401, detail="User not found or inactive.")
 
     new_access_token = create_access_token(user.id, user.role.value)
+    new_refresh_token = create_refresh_token(user.id)
     await write_audit_log(db, AuditAction.TOKEN_REFRESHED, user_id=user.id, request=request)
 
+    response.set_cookie(
+        key="refresh_token",
+        value=new_refresh_token,
+        httponly=True,
+        secure=settings.APP_ENV == "production",
+        samesite="lax",
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+        path="/api/auth/refresh",
+    )
     return TokenResponse(
         access_token=new_access_token,
         expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
