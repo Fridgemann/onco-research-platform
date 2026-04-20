@@ -1,0 +1,222 @@
+'use client'
+
+import { useState } from 'react'
+import { useRouter } from 'next/navigation'
+import Link from 'next/link'
+import { apiFetch, ApiError } from '@/lib/api'
+import { saveToken } from '@/lib/auth'
+
+export default function RegisterPage() {
+  const router = useRouter()
+  const [form, setForm] = useState({ email: '', full_name: '', password: '' })
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  function set(field: keyof typeof form) {
+    return (e: React.ChangeEvent<HTMLInputElement>) =>
+      setForm((prev) => ({ ...prev, [field]: e.target.value }))
+  }
+
+  async function handleSubmit(e: React.SyntheticEvent<HTMLFormElement>) {
+    e.preventDefault()
+    setLoading(true)
+    setError(null)
+    try {
+      await apiFetch('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify(form),
+      })
+      const loginData = await apiFetch<{ access_token: string }>('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email: form.email, password: form.password }),
+      })
+      saveToken(loginData.access_token)
+      router.push('/dashboard')
+    } catch (err) {
+      if (err instanceof ApiError) setError(err.message)
+      else setError('Something went wrong')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const passwordRules = [
+    { label: '10+ characters', ok: form.password.length >= 10 },
+    { label: 'Uppercase letter', ok: /[A-Z]/.test(form.password) },
+    { label: 'Number', ok: /[0-9]/.test(form.password) },
+    { label: 'Special character', ok: /[!@#$%^&*(),.?":{}|<>]/.test(form.password) },
+  ]
+
+  return (
+    <div className="min-h-screen flex auth-texture" style={{ background: 'var(--bg-base)' }}>
+      {/* Left — branding */}
+      <div className="hidden lg:flex auth-brand-panel w-[42%] flex-col">
+        <div className="anim-fade-up">
+          <div className="app-logo mb-10">
+            <span className="app-logo-text">
+              <span className="app-logo-accent">Onco</span>Research
+            </span>
+          </div>
+
+          <h1
+            className="display mb-5"
+            style={{ fontSize: '38px', lineHeight: 1.2 }}
+          >
+            Join the platform
+          </h1>
+
+          <p style={{ color: 'var(--text-secondary)', fontSize: '13px', lineHeight: 1.8, maxWidth: '340px' }}>
+            Create your researcher account to start uploading datasets,
+            running survival analyses, and collaborating with your team
+            in secure, audit-logged workspaces.
+          </p>
+        </div>
+
+        <div className="anim-fade-up-3">
+          <div style={{ borderTop: '1px solid var(--border)', paddingTop: '28px' }}>
+            <p className="label" style={{ marginBottom: '14px' }}>Security features</p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              {[
+                'Field-level AES encryption for all PII',
+                'JWT access tokens — 15 min expiry',
+                'Append-only audit log',
+                'Account lockout after 5 failed attempts',
+              ].map((item) => (
+                <div key={item} style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                  <span style={{ color: 'var(--accent)', fontSize: '11px', flexShrink: 0, marginTop: '1px' }}>▸</span>
+                  <span style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>{item}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Right — form */}
+      <div
+        className="flex-1 flex items-center justify-center px-8 py-12"
+        style={{ minWidth: 0 }}
+      >
+        <div className="w-full" style={{ maxWidth: '380px' }}>
+          {/* Mobile logo */}
+          <div className="lg:hidden app-logo mb-8 anim-fade-up">
+            <span className="app-logo-text">
+              <span className="app-logo-accent">Onco</span>Research
+            </span>
+          </div>
+
+          <div className="anim-fade-up-1" style={{ marginBottom: '32px' }}>
+            <h2 className="display" style={{ fontSize: '28px', marginBottom: '6px' }}>
+              Create account
+            </h2>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>
+              Researcher access — all fields required
+            </p>
+          </div>
+
+          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div className="anim-fade-up-2">
+              <label className="field-label" htmlFor="full_name">Full name</label>
+              <input
+                id="full_name"
+                type="text"
+                required
+                autoComplete="name"
+                value={form.full_name}
+                onChange={set('full_name')}
+                className="field-input"
+                placeholder="Dr. Jane Smith"
+              />
+            </div>
+
+            <div className="anim-fade-up-3">
+              <label className="field-label" htmlFor="email">Email address</label>
+              <input
+                id="email"
+                type="email"
+                required
+                autoComplete="email"
+                value={form.email}
+                onChange={set('email')}
+                className="field-input"
+                placeholder="researcher@institution.org"
+              />
+            </div>
+
+            <div className="anim-fade-up-4">
+              <label className="field-label" htmlFor="password">Password</label>
+              <input
+                id="password"
+                type="password"
+                required
+                autoComplete="new-password"
+                value={form.password}
+                onChange={set('password')}
+                className="field-input"
+              />
+
+              {form.password.length > 0 && (
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '1fr 1fr',
+                    gap: '5px',
+                    marginTop: '10px',
+                  }}
+                >
+                  {passwordRules.map((r) => (
+                    <div
+                      key={r.label}
+                      style={{
+                        display: 'flex',
+                        gap: '6px',
+                        alignItems: 'center',
+                        fontSize: '11px',
+                        color: r.ok ? 'var(--status-completed-fg)' : 'var(--text-secondary)',
+                        transition: 'color 0.2s',
+                      }}
+                    >
+                      <span>{r.ok ? '✓' : '○'}</span>
+                      {r.label}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {error && (
+              <div className="alert-error anim-fade-up">{error}</div>
+            )}
+
+            <div className="anim-fade-up-5">
+              <button
+                type="submit"
+                disabled={loading}
+                className="btn btn-primary"
+                style={{ width: '100%' }}
+              >
+                {loading ? (
+                  <>
+                    <span className="spinner" />
+                    Creating account…
+                  </>
+                ) : (
+                  'Create account'
+                )}
+              </button>
+            </div>
+          </form>
+
+          <div style={{ marginTop: '24px', textAlign: 'center' }}>
+            <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+              Already have an account?{' '}
+              <Link href="/login" style={{ color: 'var(--accent)', textDecoration: 'none' }}>
+                Sign in
+              </Link>
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}

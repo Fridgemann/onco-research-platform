@@ -1,11 +1,66 @@
 'use client'
 
 import { useEffect, useState, use } from 'react'
-import { useRouter } from 'next/navigation'
-import { apiFetch } from '@/lib/api'
-import type { Dataset, AnalysisJob } from '@/lib/types'
+import Link from 'next/link'
+import { apiFetch, ApiError } from '@/lib/api'
+import { getToken } from '@/lib/auth'
+import type { Dataset, AnalysisJob, Workspace } from '@/lib/types'
 
 type Tab = 'datasets' | 'analysis'
+
+type JobType = 'kaplan_meier' | 'descriptive_stats' | 'linear_regression' | 'logistic_regression'
+
+const JOB_TYPE_LABELS: Record<JobType, string> = {
+  kaplan_meier: 'Kaplan–Meier Survival',
+  descriptive_stats: 'Descriptive Statistics',
+  linear_regression: 'Linear Regression',
+  logistic_regression: 'Logistic Regression',
+}
+
+const FIELD_CONFIG: Record<JobType, { key: string; label: string; placeholder: string; optional?: boolean }[]> = {
+  kaplan_meier: [{ key: 'time_column', label: 'Time Column', placeholder: 'e.g. survival_months' },
+  { key: 'event_column', label: 'Event Column', placeholder: 'e.g. event_occurred' }],
+  descriptive_stats: [{ key: 'columns', label: 'Columns', placeholder: 'e.g. age, stage', optional: true }],
+  linear_regression: [{ key: 'target_column', label: 'Target Column', placeholder: 'e.g. survival_status' },
+  { key: 'feature_columns', label: 'Feature Columns', placeholder: 'e.g. tumor_size' }],
+  logistic_regression: [{ key: 'target_column', label: 'Target Column', placeholder: 'e.g. survival_status' },
+  { key: 'feature_columns', label: 'Feature Columns', placeholder: 'e.g. age, tumor_size' }],                     
+}
+
+function AnalysisParamFields({
+  jobType,
+  params,
+  setParams,
+}: {
+  jobType: JobType,
+  params: Record<string, string>,
+  setParams: (p: Record<string, string>) => void
+}) {
+  return (
+    <div className='flex flex-col gap-4'>
+      {FIELD_CONFIG[jobType].map((f) => (
+        <div key={f.key}>
+          <label className='field-label'>{f.label}</label>
+          <input 
+            className='field-input'
+            value={params[f.key] ?? ''}
+            onChange={(e) => setParams({...params, [f.key]: e.target.value })}
+            placeholder={f.placeholder}
+          />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function StatusBadge({ status }: { status: AnalysisJob['status'] }) {
+  return (
+    <span className={`badge badge-${status}`}>
+      <span className="badge-dot" />
+      {status}
+    </span>
+  )
+}
 
 export default function WorkspacePage({
   params,
@@ -13,24 +68,42 @@ export default function WorkspacePage({
   params: Promise<{ id: string }>
 }) {
   const { id } = use(params)
-  const router = useRouter()
+  const [workspace, setWorkspace] = useState<Workspace | null>(null)
   const [tab, setTab] = useState<Tab>('datasets')
   const [datasets, setDatasets] = useState<Dataset[]>([])
   const [jobs, setJobs] = useState<AnalysisJob[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  // Upload modal
+  const [showUpload, setShowUpload] = useState(false)
+  const [uploadFile, setUploadFile] = useState<File | null>(null)
+  const [uploadDesc, setUploadDesc] = useState('')
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState<string | null>(null)
+
+  // Run analysis modal
+  const [showAnalysis, setShowAnalysis] = useState(false)
+  const [jobType, setJobType] = useState<JobType>('kaplan_meier')
+  const [jobDatasetId, setJobDatasetId] = useState('')
+  const [jobParams, setJobParams] = useState<Record<string, string>>({})
+  const [submitting, setSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState<string | null>(null)
+
   useEffect(() => {
     async function load() {
       try {
-        const [ds, js] = await Promise.all([
+        const [ws, ds, js] = await Promise.all([
+          apiFetch<Workspace>(`/api/workspaces/${id}`),
           apiFetch<Dataset[]>(`/api/workspaces/${id}/datasets`),
           apiFetch<AnalysisJob[]>(`/api/analysis?workspace_id=${id}`),
         ])
+        setWorkspace(ws)
         setDatasets(ds)
         setJobs(js)
-      } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : 'Failed to load')
+        if (ds.length > 0) setJobDatasetId(ds[0].id)
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : 'Failed to load workspace')
       } finally {
         setLoading(false)
       }
@@ -38,108 +111,393 @@ export default function WorkspacePage({
     load()
   }, [id])
 
+  // Reset params when job type changes
+  useEffect(() => {
+    setJobParams({})
+  }, [jobType])
+
+  async function handleUpload(e: React.SyntheticEvent<HTMLFormElement>) {
+    e.preventDefault()
+    if (!uploadFile) return
+    setUploading(true)
+    setUploadError(null)
+    try {
+      const formData = new FormData()
+      formData.append('file', uploadFile)
+      if (uploadDesc) formData.append('description', uploadDesc)
+
+      const token = getToken()
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'}/api/workspaces/${id}/datasets`,
+        {
+          method: 'POST',
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          body: formData,
+          credentials: 'include',
+        },
+      )
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.detail ?? `HTTP ${res.status}`)
+      }
+      const ds = await res.json() as Dataset
+      setDatasets((prev) => [ds, ...prev])
+      setShowUpload(false)
+      setUploadFile(null)
+      setUploadDesc('')
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Upload failed')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  async function handleRunAnalysis(e: React.SyntheticEvent<HTMLFormElement>) {
+    e.preventDefault()
+    setSubmitting(true)
+    setSubmitError(null)
+    try {
+      // Convert comma-separated string params to arrays where needed
+      const parameters: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(jobParams)) {
+        if (k.endsWith('_columns') || k === 'columns') {
+          parameters[k] = v.split(',').map((s) => s.trim()).filter(Boolean)
+        } else {
+          parameters[k] = v
+        }
+      }
+
+      const job = await apiFetch<AnalysisJob>(
+        `/api/workspaces/${id}/datasets/${jobDatasetId}/analysis`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ job_type: jobType, parameters }),
+        },
+      )
+      setJobs((prev) => [job, ...prev])
+      setShowAnalysis(false)
+      setTab('analysis')
+    } catch (err) {
+      setSubmitError(err instanceof ApiError ? err.message : 'Failed to submit job')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   return (
-    <div className="min-h-screen bg-gray-50">
-      <header className="bg-white border-b border-gray-200 px-6 py-4 flex items-center gap-4">
-        <button
-          onClick={() => router.push('/dashboard')}
-          className="text-sm text-gray-500 hover:text-gray-900 transition-colors"
-        >
-          ← Dashboard
-        </button>
-        <h1 className="text-lg font-semibold text-gray-900">Workspace</h1>
+    <div className="min-h-screen" style={{ background: 'var(--bg-base)' }}>
+      {/* Header */}
+      <header className="app-header">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <Link
+            href="/dashboard"
+            style={{
+              fontSize: '11px',
+              letterSpacing: '0.06em',
+              textTransform: 'uppercase',
+              color: 'var(--text-secondary)',
+              textDecoration: 'none',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              transition: 'color 0.15s',
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--text-primary)')}
+            onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-secondary)')}
+          >
+            ← Workspaces
+          </Link>
+
+          {workspace && (
+            <>
+              <span style={{ color: 'var(--border-strong)' }}>|</span>
+              <span style={{ fontSize: '13px', color: 'var(--text-primary)' }}>
+                {workspace.name}
+              </span>
+            </>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button
+            className="btn btn-outline btn-sm"
+            onClick={() => setShowUpload(true)}
+          >
+            Upload dataset
+          </button>
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={() => setShowAnalysis(true)}
+            disabled={datasets.length === 0}
+            title={datasets.length === 0 ? 'Upload a dataset first' : undefined}
+          >
+            Run analysis
+          </button>
+        </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-6 py-8">
-        {/* Tabs */}
-        <div className="flex gap-1 border-b border-gray-200 mb-6">
+      {/* Main */}
+      <main style={{ maxWidth: '920px', margin: '0 auto', padding: '32px 28px' }}>
+        {error && (
+          <div className="alert-error anim-fade-up" style={{ marginBottom: '24px' }}>
+            {error}
+          </div>
+        )}
+
+        {/* Tab nav */}
+        <div className="tab-nav anim-fade-up" style={{ marginBottom: '24px' }}>
           {(['datasets', 'analysis'] as Tab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
-              className={`px-4 py-2 text-sm font-medium capitalize transition-colors border-b-2 -mb-px ${
-                tab === t
-                  ? 'border-blue-600 text-blue-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-900'
-              }`}
+              className={`tab-btn ${tab === t ? 'active' : ''}`}
             >
-              {t}
+              {t === 'datasets'
+                ? `Datasets${datasets.length ? ` (${datasets.length})` : ''}`
+                : `Analysis jobs${jobs.length ? ` (${jobs.length})` : ''}`}
             </button>
           ))}
         </div>
 
-        {loading && <p className="text-sm text-gray-500">Loading…</p>}
-        {error && (
-          <p className="text-sm text-red-600 bg-red-50 rounded-lg px-4 py-3">{error}</p>
+        {loading && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="skeleton" style={{ height: '60px' }} />
+            ))}
+          </div>
         )}
 
         {/* Datasets tab */}
         {!loading && tab === 'datasets' && (
-          <div className="flex flex-col gap-3">
-            {datasets.length === 0 && (
-              <p className="text-sm text-gray-500">No datasets uploaded yet.</p>
-            )}
-            {datasets.map((ds) => (
-              <div
-                key={ds.id}
-                className="bg-white rounded-xl border border-gray-200 px-5 py-4"
-              >
-                <p className="font-medium text-gray-900 text-sm">{ds.filename}</p>
-                <div className="flex gap-4 mt-1 text-xs text-gray-400">
-                  <span>{(ds.file_size / 1024).toFixed(1)} KB</span>
-                  <span>{ds.content_type}</span>
-                  <span>{new Date(ds.created_at).toLocaleDateString()}</span>
-                </div>
-                {ds.description && (
-                  <p className="text-xs text-gray-500 mt-1">{ds.description}</p>
-                )}
+          <div className="card anim-fade-up">
+            {datasets.length === 0 ? (
+              <div style={{ padding: '48px 32px', textAlign: 'center' }}>
+                <p className="display" style={{ fontSize: '22px', color: 'var(--text-secondary)', marginBottom: '10px' }}>
+                  No datasets yet
+                </p>
+                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '20px' }}>
+                  Upload a CSV or Excel file to get started with analysis.
+                </p>
+                <button className="btn btn-outline" onClick={() => setShowUpload(true)}>
+                  Upload dataset
+                </button>
               </div>
-            ))}
+            ) : (
+              datasets.map((ds, i) => (
+                <div key={ds.id} className="dataset-row" style={{ animationDelay: `${i * 0.05}s` }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <p style={{ fontSize: '13px', color: 'var(--text-primary)', marginBottom: '3px' }}>
+                      {ds.filename}
+                    </p>
+                    <div style={{ display: 'flex', gap: '14px' }}>
+                      <span className="mono-sm">{(ds.file_size / 1024).toFixed(1)} KB</span>
+                      <span className="mono-sm">{ds.content_type}</span>
+                      <span className="mono-sm">
+                        {new Date(ds.created_at).toLocaleDateString('en-GB', {
+                          day: 'numeric', month: 'short', year: 'numeric',
+                        })}
+                      </span>
+                    </div>
+                    {ds.description && (
+                      <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '3px' }}>
+                        {ds.description}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         )}
 
         {/* Analysis tab */}
         {!loading && tab === 'analysis' && (
-          <div className="flex flex-col gap-3">
-            {jobs.length === 0 && (
-              <p className="text-sm text-gray-500">No analysis jobs yet.</p>
-            )}
-            {jobs.map((job) => (
-              <div
-                key={job.id}
-                className="bg-white rounded-xl border border-gray-200 px-5 py-4"
-              >
-                <div className="flex items-center justify-between">
-                  <p className="font-medium text-gray-900 text-sm capitalize">
-                    {job.job_type.replace('_', ' ')}
-                  </p>
-                  <StatusBadge status={job.status} />
-                </div>
-                <p className="text-xs text-gray-400 mt-1">
-                  {new Date(job.created_at).toLocaleString()}
+          <div className="card anim-fade-up">
+            {jobs.length === 0 ? (
+              <div style={{ padding: '48px 32px', textAlign: 'center' }}>
+                <p className="display" style={{ fontSize: '22px', color: 'var(--text-secondary)', marginBottom: '10px' }}>
+                  No analysis jobs yet
                 </p>
-                {job.error_message && (
-                  <p className="text-xs text-red-500 mt-2">{job.error_message}</p>
-                )}
+                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '20px' }}>
+                  Select a dataset and run an analysis to see results here.
+                </p>
+                <button
+                  className="btn btn-outline"
+                  onClick={() => setShowAnalysis(true)}
+                  disabled={datasets.length === 0}
+                >
+                  Run analysis
+                </button>
               </div>
-            ))}
+            ) : (
+              jobs.map((job, i) => (
+                <div key={job.id} className="dataset-row" style={{ animationDelay: `${i * 0.05}s` }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px' }}>
+                      <p style={{ fontSize: '13px', color: 'var(--text-primary)' }}>
+                        {JOB_TYPE_LABELS[job.job_type as JobType] ?? job.job_type}
+                      </p>
+                      <StatusBadge status={job.status} />
+                    </div>
+                    <div style={{ display: 'flex', gap: '14px' }}>
+                      <span className="mono-sm">
+                        {new Date(job.created_at).toLocaleString('en-GB', {
+                          day: 'numeric', month: 'short', year: 'numeric',
+                          hour: '2-digit', minute: '2-digit',
+                        })}
+                      </span>
+                      {job.completed_at && (
+                        <span className="mono-sm">
+                          completed {new Date(job.completed_at).toLocaleTimeString('en-GB', {
+                            hour: '2-digit', minute: '2-digit',
+                          })}
+                        </span>
+                      )}
+                    </div>
+                    {job.error_message && (
+                      <p style={{ fontSize: '11px', color: 'var(--status-failed-fg)', marginTop: '4px' }}>
+                        {job.error_message}
+                      </p>
+                    )}
+                  </div>
+
+                  {job.status === 'completed' && job.result && (
+                    <button
+                      className="btn btn-outline btn-sm"
+                      onClick={() => {
+                        const blob = new Blob([JSON.stringify(job.result, null, 2)], { type: 'application/json' })
+                        const url = URL.createObjectURL(blob)
+                        const a = document.createElement('a')
+                        a.href = url; a.download = `${job.id}.json`; a.click()
+                        URL.revokeObjectURL(url)
+                      }}
+                    >
+                      Download result
+                    </button>
+                  )}
+                </div>
+              ))
+            )}
           </div>
         )}
       </main>
-    </div>
-  )
-}
 
-function StatusBadge({ status }: { status: AnalysisJob['status'] }) {
-  const styles: Record<AnalysisJob['status'], string> = {
-    pending: 'bg-yellow-50 text-yellow-700',
-    running: 'bg-blue-50 text-blue-700',
-    completed: 'bg-green-50 text-green-700',
-    failed: 'bg-red-50 text-red-700',
-  }
-  return (
-    <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${styles[status]}`}>
-      {status}
-    </span>
+      {/* Upload modal */}
+      {showUpload && (
+        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowUpload(false)}>
+          <div className="modal">
+            <p className="modal-title">Upload dataset</p>
+            <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+              CSV or Excel files. All data is encrypted at rest.
+            </p>
+            <hr className="modal-divider" />
+
+            <form onSubmit={handleUpload} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div>
+                <label className="field-label">File</label>
+                <input
+                  type="file"
+                  required
+                  accept=".csv,.xlsx,.xls"
+                  onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
+                  style={{
+                    width: '100%',
+                    fontSize: '12px',
+                    color: 'var(--text-secondary)',
+                    cursor: 'pointer',
+                  }}
+                />
+              </div>
+              <div>
+                <label className="field-label" htmlFor="upload-desc">
+                  Description <span style={{ opacity: 0.5 }}>(optional)</span>
+                </label>
+                <input
+                  id="upload-desc"
+                  type="text"
+                  value={uploadDesc}
+                  onChange={(e) => setUploadDesc(e.target.value)}
+                  className="field-input"
+                  placeholder="e.g. Treatment arm A — 156 patients"
+                />
+              </div>
+
+              {uploadError && <div className="alert-error">{uploadError}</div>}
+
+              <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                <button type="button" className="btn btn-outline" onClick={() => setShowUpload(false)}>
+                  Cancel
+                </button>
+                <button type="submit" disabled={uploading || !uploadFile} className="btn btn-primary">
+                  {uploading ? <><span className="spinner" /> Uploading…</> : 'Upload'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Run analysis modal */}
+      {showAnalysis && (
+        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowAnalysis(false)}>
+          <div className="modal">
+            <p className="modal-title">Run analysis</p>
+            <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+              Submitted jobs run asynchronously via Celery.
+            </p>
+            <hr className="modal-divider" />
+
+            <form onSubmit={handleRunAnalysis} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div>
+                <label className="field-label" htmlFor="job-dataset">Dataset</label>
+                <select
+                  id="job-dataset"
+                  required
+                  value={jobDatasetId}
+                  onChange={(e) => setJobDatasetId(e.target.value)}
+                  className="field-select"
+                >
+                  {datasets.map((ds) => (
+                    <option key={ds.id} value={ds.id}>{ds.filename}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="field-label" htmlFor="job-type">Analysis type</label>
+                <select
+                  id="job-type"
+                  required
+                  value={jobType}
+                  onChange={(e) => setJobType(e.target.value as JobType)}
+                  className="field-select"
+                >
+                  {(Object.entries(JOB_TYPE_LABELS) as [JobType, string][]).map(([k, v]) => (
+                    <option key={k} value={k}>{v}</option>
+                  ))}
+                </select>
+              </div>
+
+              <AnalysisParamFields
+                jobType={jobType}
+                params={jobParams}
+                setParams={setJobParams}
+              />
+
+              {submitError && <div className="alert-error">{submitError}</div>}
+
+              <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                <button type="button" className="btn btn-outline" onClick={() => setShowAnalysis(false)}>
+                  Cancel
+                </button>
+                <button type="submit" disabled={submitting} className="btn btn-primary">
+                  {submitting ? <><span className="spinner" /> Submitting…</> : 'Run analysis'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
