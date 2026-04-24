@@ -1,18 +1,19 @@
-const TOKEN_KEY = 'access_token'
+// Token lives only in JS heap — invisible to localStorage enumeration,
+// cleared on page reload (refresh cookie re-hydrates it via layout.tsx)
+let _token: string | null = null
 
 export function saveToken(token: string): void {
-  localStorage.setItem(TOKEN_KEY, token)
+  _token = token
 }
 
 export function getToken(): string | null {
-  if (typeof window === 'undefined') return null
-  return localStorage.getItem(TOKEN_KEY)
+  return _token
 }
 
 export function clearToken(): void {
-  localStorage.removeItem(TOKEN_KEY)
+  _token = null
 }
 
 export function isAuthenticated(): boolean {
-  return !!getToken()
+  return _token !== null
 }
