@@ -12,6 +12,7 @@ class JobType(str, PyEnum):
     KAPLAN_MEIER = "kaplan_meier"
     REGRESSION = "regression"
     DESCRIPTIVE_STATS = "descriptive_stats"
+    LOGISTIC_REGRESSION = "logistic_regression"
 
 
 class JobStatus(str, PyEnum):

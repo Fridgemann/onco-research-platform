@@ -130,6 +130,43 @@ def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
 
 
 
+def _run_logistic_regression(df: pd.DataFrame, params: dict) -> dict:
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import roc_auc_score, accuracy_score
+
+    target_col = params["target_column"]
+    feature_cols = params["feature_columns"]
+    df_clean = df[[target_col] + feature_cols].dropna()
+    
+    y = df_clean[target_col].values
+    X = df_clean[feature_cols].values
+
+    model = LogisticRegression(max_iter=1000)
+    model.fit(X, y)
+
+    y_pred = model.predict(X)
+    accuracy = float(accuracy_score(y, y_pred))
+
+    auc = None
+    try:
+        if len(model.classes_) == 2:
+            auc = float(roc_auc_score(y, model.predict_proba(X)[:, 1]))
+    except Exception:
+        pass
+
+    return {
+        "type": "logistic",
+        "target": target_col,
+        "features": feature_cols,
+        "intercept": float(model.intercept_[0]),
+        "coefficients": {f: float(c) for f, c in zip(feature_cols, model.coef_[0])},
+        "accuracy": accuracy,
+        "auc": auc,
+        "n": len(y),
+        "classes": model.classes_.tolist(),
+    }
+
+
 @celery_app.task(bind=True, name="run_analysis")
 def run_analysis_task(self, job_id: str):
     with SyncSession() as session:
@@ -152,6 +189,7 @@ def run_analysis_task(self, job_id: str):
                 "kaplan_meier": _run_kaplan_meier,
                 "regression": _run_regression,
                 "descriptive_stats": _run_descriptive_stats,
+                "logistic_regression": _run_logistic_regression,
             }
             result = dispatch[job.job_type](df, params)
 

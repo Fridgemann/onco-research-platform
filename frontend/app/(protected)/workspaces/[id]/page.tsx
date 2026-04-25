@@ -8,12 +8,12 @@ import type { Dataset, AnalysisJob, Workspace } from '@/lib/types'
 
 type Tab = 'datasets' | 'analysis'
 
-type JobType = 'kaplan_meier' | 'descriptive_stats' | 'linear_regression' | 'logistic_regression'
+type JobType = 'kaplan_meier' | 'descriptive_stats' | 'regression' | 'logistic_regression'
 
 const JOB_TYPE_LABELS: Record<JobType, string> = {
   kaplan_meier: 'Kaplan–Meier Survival',
   descriptive_stats: 'Descriptive Statistics',
-  linear_regression: 'Linear Regression',
+  regression: 'Linear Regression',
   logistic_regression: 'Logistic Regression',
 }
 
@@ -21,10 +21,10 @@ const FIELD_CONFIG: Record<JobType, { key: string; label: string; placeholder: s
   kaplan_meier: [{ key: 'time_column', label: 'Time Column', placeholder: 'e.g. survival_months' },
   { key: 'event_column', label: 'Event Column', placeholder: 'e.g. event_occurred' }],
   descriptive_stats: [{ key: 'columns', label: 'Columns', placeholder: 'e.g. age, stage', optional: true }],
-  linear_regression: [{ key: 'target_column', label: 'Target Column', placeholder: 'e.g. survival_status' },
+  regression: [{ key: 'target_column', label: 'Target Column', placeholder: 'e.g. survival_months' },
   { key: 'feature_columns', label: 'Feature Columns', placeholder: 'e.g. tumor_size' }],
   logistic_regression: [{ key: 'target_column', label: 'Target Column', placeholder: 'e.g. survival_status' },
-  { key: 'feature_columns', label: 'Feature Columns', placeholder: 'e.g. age, tumor_size' }],                     
+  { key: 'feature_columns', label: 'Feature Columns', placeholder: 'e.g. age, tumor_size' }],
 }
 
 function AnalysisParamFields({
