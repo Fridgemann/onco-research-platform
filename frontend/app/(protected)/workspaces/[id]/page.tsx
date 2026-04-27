@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { apiFetch, ApiError } from '@/lib/api'
 import { getToken } from '@/lib/auth'
 import type { Dataset, AnalysisJob, Workspace } from '@/lib/types'
+import ResultPanel from '@/components/analysis/ResultPanel'
 
 type Tab = 'datasets' | 'analysis'
 
@@ -18,8 +19,11 @@ const JOB_TYPE_LABELS: Record<JobType, string> = {
 }
 
 const FIELD_CONFIG: Record<JobType, { key: string; label: string; placeholder: string; optional?: boolean }[]> = {
-  kaplan_meier: [{ key: 'time_column', label: 'Time Column', placeholder: 'e.g. survival_months' },
-  { key: 'event_column', label: 'Event Column', placeholder: 'e.g. event_occurred' }],
+  kaplan_meier: [
+    { key: 'time_column', label: 'Time Column', placeholder: 'e.g. survival_months' },
+    { key: 'event_column', label: 'Event Column', placeholder: 'e.g. event_occurred' },
+    { key: 'group_column', label: 'Group Column', placeholder: 'e.g. treatment_arm', optional: true },
+  ],
   descriptive_stats: [{ key: 'columns', label: 'Columns', placeholder: 'e.g. age, stage', optional: true }],
   regression: [{ key: 'target_column', label: 'Target Column', placeholder: 'e.g. survival_months' },
   { key: 'feature_columns', label: 'Feature Columns', placeholder: 'e.g. tumor_size' }],
@@ -89,6 +93,7 @@ export default function WorkspacePage({
   const [jobParams, setJobParams] = useState<Record<string, string>>({})
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  const [expandedJobId, setExpandedJobId] = useState<string | null>(null)
 
   useEffect(() => {
     async function load() {
@@ -331,49 +336,65 @@ export default function WorkspacePage({
               </div>
             ) : (
               jobs.map((job, i) => (
-                <div key={job.id} className="dataset-row" style={{ animationDelay: `${i * 0.05}s` }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px' }}>
-                      <p style={{ fontSize: '13px', color: 'var(--text-primary)' }}>
-                        {JOB_TYPE_LABELS[job.job_type as JobType] ?? job.job_type}
-                      </p>
-                      <StatusBadge status={job.status} />
-                    </div>
-                    <div style={{ display: 'flex', gap: '14px' }}>
-                      <span className="mono-sm">
-                        {new Date(job.created_at).toLocaleString('en-GB', {
-                          day: 'numeric', month: 'short', year: 'numeric',
-                          hour: '2-digit', minute: '2-digit',
-                        })}
-                      </span>
-                      {job.completed_at && (
+                <div key={job.id} style={{ animationDelay: `${i * 0.05}s` }}>
+                  <div className="dataset-row">
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px' }}>
+                        <p style={{ fontSize: '13px', color: 'var(--text-primary)' }}>
+                          {JOB_TYPE_LABELS[job.job_type as JobType] ?? job.job_type}
+                        </p>
+                        <StatusBadge status={job.status} />
+                      </div>
+                      <div style={{ display: 'flex', gap: '14px' }}>
                         <span className="mono-sm">
-                          completed {new Date(job.completed_at).toLocaleTimeString('en-GB', {
+                          {new Date(job.created_at).toLocaleString('en-GB', {
+                            day: 'numeric', month: 'short', year: 'numeric',
                             hour: '2-digit', minute: '2-digit',
                           })}
                         </span>
+                        {job.completed_at && (
+                          <span className="mono-sm">
+                            completed {new Date(job.completed_at).toLocaleTimeString('en-GB', {
+                              hour: '2-digit', minute: '2-digit',
+                            })}
+                          </span>
+                        )}
+                      </div>
+                      {job.error_message && (
+                        <p style={{ fontSize: '11px', color: 'var(--status-failed-fg)', marginTop: '4px' }}>
+                          {job.error_message}
+                        </p>
                       )}
                     </div>
-                    {job.error_message && (
-                      <p style={{ fontSize: '11px', color: 'var(--status-failed-fg)', marginTop: '4px' }}>
-                        {job.error_message}
-                      </p>
+
+                    {job.status === 'completed' && job.result && (
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <button
+                          className="btn btn-outline btn-sm"
+                          onClick={() => setExpandedJobId(expandedJobId === job.id ? null : job.id)}
+                        >
+                          {expandedJobId === job.id ? 'Hide results' : 'View results'}
+                        </button>
+                        <button
+                          className="btn btn-outline btn-sm"
+                          onClick={() => {
+                            const blob = new Blob([JSON.stringify(job.result, null, 2)], { type: 'application/json' })
+                            const url = URL.createObjectURL(blob)
+                            const a = document.createElement('a')
+                            a.href = url; a.download = `${job.id}.json`; a.click()
+                            URL.revokeObjectURL(url)
+                          }}
+                        >
+                          ↓
+                        </button>
+                      </div>
                     )}
                   </div>
 
-                  {job.status === 'completed' && job.result && (
-                    <button
-                      className="btn btn-outline btn-sm"
-                      onClick={() => {
-                        const blob = new Blob([JSON.stringify(job.result, null, 2)], { type: 'application/json' })
-                        const url = URL.createObjectURL(blob)
-                        const a = document.createElement('a')
-                        a.href = url; a.download = `${job.id}.json`; a.click()
-                        URL.revokeObjectURL(url)
-                      }}
-                    >
-                      Download result
-                    </button>
+                  {expandedJobId === job.id && job.result && (
+                    <div style={{ padding: '20px 24px', borderTop: '1px solid var(--border)', background: 'rgba(255,255,255,0.01)' }}>
+                      <ResultPanel job={job} />
+                    </div>
                   )}
                 </div>
               ))
