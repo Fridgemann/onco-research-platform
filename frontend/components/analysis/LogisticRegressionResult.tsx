@@ -33,7 +33,7 @@ export default function LogisticRegressionResult({ data }: { data: LogisticData 
         <p style={{ fontSize: '10px', color: '#7a8399', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '12px', fontFamily: 'var(--font-mono)' }}>
           Feature coefficients — positive raises probability, negative lowers it
         </p>
-        <ResponsiveContainer width="100%" height={Math.max(120, chartData.length * 40)}>
+        <ResponsiveContainer width="100%" height={Math.min(Math.max(120, chartData.length * 40), 800)}>
           <BarChart data={chartData} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e2433" horizontal={false} />
             <XAxis type="number" tick={{ fill: '#7a8399', fontSize: 10, fontFamily: 'monospace' }} axisLine={false} tickLine={false} />

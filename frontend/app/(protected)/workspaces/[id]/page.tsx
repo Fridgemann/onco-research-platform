@@ -23,6 +23,7 @@ const FIELD_CONFIG: Record<JobType, { key: string; label: string; placeholder: s
     { key: 'time_column', label: 'Time Column', placeholder: 'e.g. survival_months' },
     { key: 'event_column', label: 'Event Column', placeholder: 'e.g. event_occurred' },
     { key: 'group_column', label: 'Group Column', placeholder: 'e.g. treatment_arm', optional: true },
+    { key: 'max_groups', label: 'Max Groups', placeholder: 'e.g. 60 — leave blank for default (server max: 100)', optional: true },
   ],
   descriptive_stats: [{ key: 'columns', label: 'Columns', placeholder: 'e.g. age, stage', optional: true }],
   regression: [{ key: 'target_column', label: 'Target Column', placeholder: 'e.g. survival_months' },
@@ -42,17 +43,20 @@ function AnalysisParamFields({
 }) {
   return (
     <div className='flex flex-col gap-4'>
-      {FIELD_CONFIG[jobType].map((f) => (
-        <div key={f.key}>
-          <label className='field-label'>{f.label}</label>
-          <input 
-            className='field-input'
-            value={params[f.key] ?? ''}
-            onChange={(e) => setParams({...params, [f.key]: e.target.value })}
-            placeholder={f.placeholder}
-          />
-        </div>
-      ))}
+      {FIELD_CONFIG[jobType].map((f) => {
+        if (f.key === 'max_groups' && !params['group_column']) return null
+        return (
+          <div key={f.key}>
+            <label className='field-label'>{f.label}{f.optional && <span style={{ opacity: 0.5 }}> (optional)</span>}</label>
+            <input
+              className='field-input'
+              value={params[f.key] ?? ''}
+              onChange={(e) => setParams({...params, [f.key]: e.target.value })}
+              placeholder={f.placeholder}
+            />
+          </div>
+        )
+      })}
     </div>
   )
 }

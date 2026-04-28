@@ -1,6 +1,7 @@
 import io
 import json
 import logging
+import os
 from datetime import datetime, timezone
 
 import numpy as np
@@ -56,11 +57,16 @@ def _run_descriptive_stats(df: pd.DataFrame, params: dict) -> dict:
     return result
 
 
+_MAX_FEATURE_COLS = 50
+
+
 def _run_regression(df: pd.DataFrame, params: dict) -> dict:
     from scipy.stats import linregress
 
     target_col = params["target_column"]
     feature_cols = params["feature_columns"]
+    if len(feature_cols) > _MAX_FEATURE_COLS:
+        raise ValueError(f"Too many feature columns ({len(feature_cols)}); maximum is {_MAX_FEATURE_COLS}.")
 
     df_clean = df[[target_col] + feature_cols].dropna()
     y = df_clean[target_col].values
@@ -95,6 +101,10 @@ def _run_regression(df: pd.DataFrame, params: dict) -> dict:
     }
 
 
+_KM_ABSOLUTE_MAX_GROUPS = int(os.getenv("KM_ABSOLUTE_MAX_GROUPS", "100"))
+_KM_MAX_UNIQUE_TIMES = int(os.getenv("KM_MAX_UNIQUE_TIMES", "2000"))
+
+
 def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
     time_col = params["time_column"]
     event_col = params["event_column"]
@@ -102,6 +112,14 @@ def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
 
     event_value = params.get("event_value")  # e.g. 2 for R convention (1=censored, 2=dead)
     df_clean = df[[time_col, event_col, group_col] if group_col else [time_col, event_col]].dropna()
+
+    unique_times = df_clean[time_col].nunique()
+    if unique_times > _KM_MAX_UNIQUE_TIMES:
+        raise ValueError(
+            f"Time column has {unique_times} unique values (max {_KM_MAX_UNIQUE_TIMES}). "
+            "Round timestamps to whole days or months to reduce resolution."
+        )
+
     event_observed = (df_clean[event_col] == event_value) if event_value is not None else df_clean[event_col]
 
     if not group_col:
@@ -114,8 +132,21 @@ def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
                 "median_survival": float(kmf.median_survival_time_)
             }
         }
+
+    requested_max = int(params.get("max_groups", _KM_ABSOLUTE_MAX_GROUPS))
+    effective_max = min(requested_max, _KM_ABSOLUTE_MAX_GROUPS)
+
+    unique_groups = df_clean[group_col].unique()
+    if len(unique_groups) > effective_max:
+        raise ValueError(
+            f"Group column has {len(unique_groups)} unique values, "
+            f"exceeds your limit of {requested_max} "
+            f"(server maximum: {_KM_ABSOLUTE_MAX_GROUPS}). "
+            "Use a categorical column with fewer distinct values."
+        )
+
     result = {}
-    for group in df_clean[group_col].unique():
+    for group in unique_groups:
         subset = df_clean[df_clean[group_col] == group]
         sub_events = (subset[event_col] == event_value) if event_value is not None else subset[event_col]
         kmf = KaplanMeierFitter()
@@ -136,8 +167,10 @@ def _run_logistic_regression(df: pd.DataFrame, params: dict) -> dict:
 
     target_col = params["target_column"]
     feature_cols = params["feature_columns"]
+    if len(feature_cols) > _MAX_FEATURE_COLS:
+        raise ValueError(f"Too many feature columns ({len(feature_cols)}); maximum is {_MAX_FEATURE_COLS}.")
     df_clean = df[[target_col] + feature_cols].dropna()
-    
+
     y = df_clean[target_col].values
     X = df_clean[feature_cols].values
 
@@ -198,10 +231,17 @@ def run_analysis_task(self, job_id: str):
                      result=json.dumps(result),
                      completed_at=datetime.now(timezone.utc))
 
+        except ValueError as exc:
+            # ValueError comes from our own validation guards — safe to surface
+            logger.warning("Job %s validation error: %s", job_id, exc)
+            _set_job(session, job,
+                     status=JobStatus.FAILED,
+                     error_message=str(exc)[:512],
+                     completed_at=datetime.now(timezone.utc))
         except Exception as exc:
             logger.exception("Job %s failed: %s", job_id, exc)
             _set_job(session, job,
                      status=JobStatus.FAILED,
-                     error_message=str(exc)[:1024],
+                     error_message="Analysis failed. Check that column names exist and contain numeric data.",
                      completed_at=datetime.now(timezone.utc))
             raise
