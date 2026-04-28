@@ -90,7 +90,7 @@ export default function KMCurveChart({ data }: { data: KMData }) {
           <div key={group} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', fontFamily: 'var(--font-mono)' }}>
             <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: GROUP_COLORS[i % GROUP_COLORS.length], flexShrink: 0 }} />
             <span style={{ color: '#7a8399' }}>{group}</span>
-            <span style={{ color: '#e8ddd0' }}>median: {isFinite(median) ? median.toFixed(1) : '∞'}</span>
+            <span style={{ color: '#e8ddd0' }}>median: {median !== null && isFinite(median) ? median.toFixed(1) : '∞'}</span>
           </div>
         ))}
       </div>

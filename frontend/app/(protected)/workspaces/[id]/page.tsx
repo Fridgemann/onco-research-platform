@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, use } from 'react'
+import { useEffect, useState, use, useRef } from 'react'
 import Link from 'next/link'
 import { apiFetch, ApiError } from '@/lib/api'
 import { getToken } from '@/lib/auth'
@@ -80,6 +80,7 @@ export default function WorkspacePage({
   const [error, setError] = useState<string | null>(null)
 
   // Upload modal
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [showUpload, setShowUpload] = useState(false)
   const [uploadFile, setUploadFile] = useState<File | null>(null)
   const [uploadDesc, setUploadDesc] = useState('')
@@ -147,6 +148,7 @@ export default function WorkspacePage({
       }
       const ds = await res.json() as Dataset
       setDatasets((prev) => [ds, ...prev])
+      if (!jobDatasetId) setJobDatasetId(ds.id)
       setShowUpload(false)
       setUploadFile(null)
       setUploadDesc('')
@@ -417,17 +419,43 @@ export default function WorkspacePage({
               <div>
                 <label className="field-label">File</label>
                 <input
+                  ref={fileInputRef}
                   type="file"
                   required
                   accept=".csv,.xlsx,.xls"
                   onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
-                  style={{
-                    width: '100%',
-                    fontSize: '12px',
-                    color: 'var(--text-secondary)',
-                    cursor: 'pointer',
-                  }}
+                  style={{ display: 'none' }}
                 />
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px',
+                    background: 'var(--bg-raised)',
+                    border: '1px solid var(--border-strong)',
+                    borderRadius: 'var(--radius)',
+                    padding: '8px 10px 8px 4px',
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    style={{ flexShrink: 0 }}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    Browse
+                  </button>
+                  <span style={{
+                    fontSize: '12px',
+                    color: uploadFile ? 'var(--text-primary)' : 'var(--text-secondary)',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    opacity: uploadFile ? 1 : 0.5,
+                  }}>
+                    {uploadFile ? uploadFile.name : 'No file chosen — .csv, .xlsx, .xls'}
+                  </span>
+                </div>
               </div>
               <div>
                 <label className="field-label" htmlFor="upload-desc">
