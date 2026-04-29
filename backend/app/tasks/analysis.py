@@ -1,7 +1,6 @@
 import io
 import json
 import logging
-import os
 from datetime import datetime, timezone
 
 import numpy as np
@@ -101,8 +100,8 @@ def _run_regression(df: pd.DataFrame, params: dict) -> dict:
     }
 
 
-_KM_ABSOLUTE_MAX_GROUPS = int(os.getenv("KM_ABSOLUTE_MAX_GROUPS", "100"))
-_KM_MAX_UNIQUE_TIMES = int(os.getenv("KM_MAX_UNIQUE_TIMES", "2000"))
+_KM_ABSOLUTE_MAX_GROUPS = settings.KM_ABSOLUTE_MAX_GROUPS
+_KM_MAX_UNIQUE_TIMES = settings.KM_MAX_UNIQUE_TIMES
 
 
 def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:

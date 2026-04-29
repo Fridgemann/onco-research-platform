@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     EMAILS_FROM: str = "noreply@oncologyplatform.com"
     RATE_LIMIT_LOGIN: str = "5/minute"
     RATE_LIMIT_API: str = "100/minute"
+    KM_ABSOLUTE_MAX_GROUPS: int = 100
+    KM_MAX_UNIQUE_TIMES: int = 2000
 
     class Config:
         env_file = ".env"
