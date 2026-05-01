@@ -1,12 +1,13 @@
 'use client'
 
 import type { AnalysisJob } from '@/lib/types'
+import ErrorBoundary from '@/components/ErrorBoundary'
 import KMCurveChart from './KMCurveChart'
 import DescriptiveStatsTable from './DescriptiveStatsTable'
 import RegressionResult from './RegressionResult'
 import LogisticRegressionResult from './LogisticRegressionResult'
 
-export default function ResultPanel({ job }: { job: AnalysisJob }) {
+function ResultPanelInner({ job }: { job: AnalysisJob }) {
   if (!job.result) return null
 
   switch (job.job_type) {
@@ -25,4 +26,12 @@ export default function ResultPanel({ job }: { job: AnalysisJob }) {
         </pre>
       )
   }
+}
+
+export default function ResultPanel({ job }: { job: AnalysisJob }) {
+  return (
+    <ErrorBoundary>
+      <ResultPanelInner job={job} />
+    </ErrorBoundary>
+  )
 }
