@@ -19,6 +19,7 @@ from app.schemas.invite import (
     InviteAcceptResponse,
 )
 from app.services.audit import write_audit_log
+from app.services.email import send_invite_email
 from app.api.dependencies import CurrentUser
 from app.api.routes.workspace import _get_workspace_or_404, _require_owner
 
@@ -96,6 +97,8 @@ async def create_invite(
         resource_id=invite.id,
         request=request,
     )
+
+    await send_invite_email(body.email.lower(), plain_token, workspace.name)
 
     return InviteCreateResponse(
         invite_id=invite.id,

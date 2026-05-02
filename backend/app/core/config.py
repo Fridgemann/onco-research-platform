@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
     EMAILS_FROM: str = "noreply@oncologyplatform.com"
+    FRONTEND_URL: str = "http://localhost:3000"
     RATE_LIMIT_LOGIN: str = "5/minute"
     RATE_LIMIT_API: str = "100/minute"
     KM_ABSOLUTE_MAX_GROUPS: int = 100
