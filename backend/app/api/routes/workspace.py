@@ -6,10 +6,11 @@ from datetime import datetime, timezone
 from app.core.database import get_db
 from app.models.workspace import Workspace, WorkspaceMember, MemberRole
 from app.models.audit_log import AuditAction
-from app.schemas.workspace import WorkspaceCreate, WorkspaceUpdate, WorkspaceResponse
+from app.schemas.workspace import WorkspaceCreate, WorkspaceUpdate, WorkspaceResponse, WorkspaceMemberResponse
 from app.services.audit import write_audit_log
 from app.api.dependencies import CurrentUser
 from app.models.user import User
+from app.core.security import decrypt_field
 
 router = APIRouter(prefix="/workspaces", tags=["Workspaces"])
 
@@ -74,6 +75,42 @@ async def list_workspaces(
         .where(WorkspaceMember.user_id == current_user.id)
     )
     return result.scalars().all()
+
+
+@router.get("/{workspace_id}/members", response_model=list[WorkspaceMemberResponse])
+async def list_members(
+    workspace_id: str,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    workspace = await _get_workspace_or_404(workspace_id, db)
+
+    member = await db.execute(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == current_user.id,
+        )
+    )
+    if not member.scalar_one_or_none():
+        raise HTTPException(status_code=403, detail="You are not a member of this workspace.")
+
+    result = await db.execute(
+        select(WorkspaceMember, User)
+        .join(User, User.id == WorkspaceMember.user_id)
+        .where(WorkspaceMember.workspace_id == workspace_id)
+        .order_by(WorkspaceMember.joined_at)
+    )
+    return [
+        WorkspaceMemberResponse(
+            id=m.id,
+            user_id=m.user_id,
+            email=decrypt_field(u.email_encrypted),
+            role=m.role,
+            invited_by=m.invited_by,
+            joined_at=m.joined_at,
+        )
+        for m, u in result.all()
+    ]
 
 
 @router.get("/{workspace_id}", response_model=WorkspaceResponse)

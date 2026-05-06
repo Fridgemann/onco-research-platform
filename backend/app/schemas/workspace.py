@@ -30,6 +30,7 @@ class WorkspaceUpdate(BaseModel):
 class WorkspaceMemberResponse(BaseModel):
     id: str
     user_id: str
+    email: str
     role: MemberRole
     invited_by: str
     joined_at: datetime

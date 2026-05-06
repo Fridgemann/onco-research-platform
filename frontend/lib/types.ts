@@ -13,8 +13,28 @@ export interface Workspace {
   id: string
   name: string
   description: string | null
-  created_by: string
+  owner_id: string
   created_at: string
+}
+
+export interface WorkspaceMember {
+  id: string
+  user_id: string
+  email: string
+  role: 'owner' | 'collaborator'
+  invited_by: string
+  joined_at: string
+}
+
+export interface WorkspaceInvite {
+  id: string
+  workspace_id: string
+  invited_email: string
+  status: 'pending' | 'accepted' | 'revoked'
+  invited_by: string
+  created_at: string
+  expires_at: string
+  accepted_at: string | null
 }
 
 export interface Dataset {

@@ -37,7 +37,12 @@ export default function DashboardPage() {
     load()
   }, [])
 
-  function handleLogout() {
+  async function handleLogout() {
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' })
+    } catch {
+      // proceed regardless — cookie may already be gone
+    }
     clearToken()
     router.replace('/login')
   }

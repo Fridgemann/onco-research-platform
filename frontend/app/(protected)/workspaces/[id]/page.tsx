@@ -4,10 +4,10 @@ import { useEffect, useState, use, useRef } from 'react'
 import Link from 'next/link'
 import { apiFetch, ApiError } from '@/lib/api'
 import { getToken } from '@/lib/auth'
-import type { Dataset, AnalysisJob, Workspace } from '@/lib/types'
+import type { Dataset, AnalysisJob, Workspace, WorkspaceInvite, WorkspaceMember, User } from '@/lib/types'
 import ResultPanel from '@/components/analysis/ResultPanel'
 
-type Tab = 'datasets' | 'analysis'
+type Tab = 'datasets' | 'analysis' | 'members'
 
 type JobType = 'kaplan_meier' | 'descriptive_stats' | 'regression' | 'logistic_regression'
 
@@ -91,6 +91,19 @@ export default function WorkspacePage({
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
 
+  // Current user (for owner check)
+  const [currentUser, setCurrentUser] = useState<User | null>(null)
+
+  // Members / invites tab
+  const [members, setMembers] = useState<WorkspaceMember[]>([])
+  const [invites, setInvites] = useState<WorkspaceInvite[]>([])
+  const [invitesLoading, setInvitesLoading] = useState(false)
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [inviting, setInviting] = useState(false)
+  const [inviteError, setInviteError] = useState<string | null>(null)
+  const [newToken, setNewToken] = useState<string | null>(null)
+  const [revoking, setRevoking] = useState<string | null>(null)
+
   // Run analysis modal
   const [showAnalysis, setShowAnalysis] = useState(false)
   const [jobType, setJobType] = useState<JobType>('kaplan_meier')
@@ -103,14 +116,16 @@ export default function WorkspacePage({
   useEffect(() => {
     async function load() {
       try {
-        const [ws, ds, js] = await Promise.all([
+        const [ws, ds, js, me] = await Promise.all([
           apiFetch<Workspace>(`/api/workspaces/${id}`),
           apiFetch<Dataset[]>(`/api/workspaces/${id}/datasets`),
           apiFetch<AnalysisJob[]>(`/api/analysis?workspace_id=${id}`),
+          apiFetch<User>('/api/auth/me'),
         ])
         setWorkspace(ws)
         setDatasets(ds)
         setJobs(js)
+        setCurrentUser(me)
         if (ds.length > 0) setJobDatasetId(ds[0].id)
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'Failed to load workspace')
@@ -195,6 +210,56 @@ export default function WorkspacePage({
     }
   }
 
+  async function loadInvites() {
+    setInvitesLoading(true)
+    try {
+      const memberData = await apiFetch<WorkspaceMember[]>(`/api/workspaces/${id}/members`)
+      setMembers(memberData)
+      try {
+        const inviteData = await apiFetch<WorkspaceInvite[]>(`/api/workspaces/${id}/invites`)
+        setInvites(inviteData)
+      } catch {
+        // non-owners get 403 on invites — members list still shows
+      }
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to load members')
+    } finally {
+      setInvitesLoading(false)
+    }
+  }
+
+  async function handleInvite(e: React.SyntheticEvent<HTMLFormElement>) {
+    e.preventDefault()
+    setInviting(true)
+    setInviteError(null)
+    setNewToken(null)
+    try {
+      const data = await apiFetch<{ invite_id: string; token: string; expires_at: string; message: string }>(
+        `/api/workspaces/${id}/invites`,
+        { method: 'POST', body: JSON.stringify({ email: inviteEmail }) },
+      )
+      setNewToken(data.token)
+      setInviteEmail('')
+      loadInvites()
+    } catch (err) {
+      setInviteError(err instanceof ApiError ? err.message : 'Failed to create invite')
+    } finally {
+      setInviting(false)
+    }
+  }
+
+  async function handleRevoke(inviteId: string) {
+    setRevoking(inviteId)
+    try {
+      await apiFetch(`/api/workspaces/${id}/invites/${inviteId}`, { method: 'DELETE' })
+      setInvites((prev) => prev.map((inv) => inv.id === inviteId ? { ...inv, status: 'revoked' as const } : inv))
+    } catch {
+      // ignore — list will be stale but not harmful
+    } finally {
+      setRevoking(null)
+    }
+  }
+
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)' }}>
       {/* Header */}
@@ -257,17 +322,18 @@ export default function WorkspacePage({
 
         {/* Tab nav */}
         <div className="tab-nav anim-fade-up" style={{ marginBottom: '24px' }}>
-          {(['datasets', 'analysis'] as Tab[]).map((t) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`tab-btn ${tab === t ? 'active' : ''}`}
-            >
-              {t === 'datasets'
-                ? `Datasets${datasets.length ? ` (${datasets.length})` : ''}`
-                : `Analysis jobs${jobs.length ? ` (${jobs.length})` : ''}`}
-            </button>
-          ))}
+          <button onClick={() => setTab('datasets')} className={`tab-btn ${tab === 'datasets' ? 'active' : ''}`}>
+            {`Datasets${datasets.length ? ` (${datasets.length})` : ''}`}
+          </button>
+          <button onClick={() => setTab('analysis')} className={`tab-btn ${tab === 'analysis' ? 'active' : ''}`}>
+            {`Analysis jobs${jobs.length ? ` (${jobs.length})` : ''}`}
+          </button>
+          <button
+            onClick={() => { setTab('members'); if (invites.length === 0) loadInvites() }}
+            className={`tab-btn ${tab === 'members' ? 'active' : ''}`}
+          >
+            Members
+          </button>
         </div>
 
         {loading && (
@@ -404,6 +470,97 @@ export default function WorkspacePage({
                   )}
                 </div>
               ))
+            )}
+          </div>
+        )}
+
+        {/* Members tab */}
+        {!loading && tab === 'members' && (
+          <div className="card anim-fade-up">
+            {workspace && currentUser?.id !== workspace.owner_id ? (
+              <div style={{ padding: '48px 32px', textAlign: 'center' }}>
+                <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                  Only the workspace owner can manage invites.
+                </p>
+              </div>
+            ) : (
+              <>
+                {/* Members list */}
+                {members.map((m) => (
+                  <div key={m.id} className="dataset-row">
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <span className="mono-sm" style={{ color: 'var(--text-primary)' }}>{m.email}</span>
+                    </div>
+                    <span style={{
+                      fontSize: '11px',
+                      letterSpacing: '0.05em',
+                      textTransform: 'uppercase',
+                      color: m.role === 'owner' ? 'var(--accent)' : 'var(--text-secondary)',
+                    }}>
+                      {m.role}
+                    </span>
+                  </div>
+                ))}
+
+                {/* Invite form */}
+                <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--border)' }}>
+                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                    Invite collaborator
+                  </p>
+                  <form onSubmit={handleInvite} style={{ display: 'flex', gap: '10px', alignItems: 'flex-end' }}>
+                    <input
+                      id="invite-email"
+                      type="email"
+                      required
+                      value={inviteEmail}
+                      onChange={(e) => setInviteEmail(e.target.value)}
+                      className="field-input"
+                      placeholder="collaborator@institution.org"
+                      style={{ flex: 1 }}
+                    />
+                    <button type="submit" disabled={inviting} className="btn btn-primary btn-sm" style={{ flexShrink: 0 }}>
+                      {inviting ? <><span className="spinner" /> Sending…</> : 'Send invite'}
+                    </button>
+                  </form>
+                  {inviteError && <div className="alert-error" style={{ marginTop: '10px' }}>{inviteError}</div>}
+                  {newToken && (
+                    <div style={{ marginTop: '12px', padding: '10px 12px', background: 'var(--bg-raised)', border: '1px solid var(--border-strong)', borderRadius: 'var(--radius)', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <code style={{ fontSize: '11px', color: 'var(--accent)', flex: 1, wordBreak: 'break-all', fontFamily: 'var(--font-mono)' }}>
+                        {`${process.env.NEXT_PUBLIC_FRONTEND_URL ?? 'http://localhost:3000'}/invites/accept?token=${newToken}`}
+                      </code>
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-sm"
+                        style={{ flexShrink: 0 }}
+                        onClick={() => navigator.clipboard.writeText(`${process.env.NEXT_PUBLIC_FRONTEND_URL ?? 'http://localhost:3000'}/invites/accept?token=${newToken}`)}
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Pending invites list */}
+                {invitesLoading ? (
+                  <div style={{ padding: '16px 24px' }}><div className="skeleton" style={{ height: '36px' }} /></div>
+                ) : invites.filter(inv => inv.status === 'pending').length === 0 ? (
+                  <div style={{ padding: '20px 24px' }}>
+                    <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>No pending invites.</p>
+                  </div>
+                ) : (
+                  invites.filter(inv => inv.status === 'pending').map((inv) => (
+                    <div key={inv.id} className="dataset-row">
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <p style={{ fontSize: '13px', color: 'var(--text-primary)', marginBottom: '2px' }}>{inv.invited_email}</p>
+                        <span className="mono-sm">expires {new Date(inv.expires_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+                      </div>
+                      <button className="btn btn-outline btn-sm" disabled={revoking === inv.id} onClick={() => handleRevoke(inv.id)}>
+                        {revoking === inv.id ? 'Revoking…' : 'Revoke'}
+                      </button>
+                    </div>
+                  ))
+                )}
+              </>
             )}
           </div>
         )}

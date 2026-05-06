@@ -1,13 +1,15 @@
 'use client'
 
-import { useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useState, Suspense } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { apiFetch, ApiError } from '@/lib/api'
 import { saveToken } from '@/lib/auth'
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const next = searchParams.get('next') ?? '/dashboard'
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -23,7 +25,7 @@ export default function LoginPage() {
         body: JSON.stringify({ email, password }),
       })
       saveToken(data.access_token)
-      router.push('/dashboard')
+      router.push(next)
     } catch (err) {
       if (err instanceof ApiError) setError(err.message)
       else setError('Something went wrong')
@@ -178,5 +180,13 @@ export default function LoginPage() {
         </div>
       </div>
     </div>
+  )
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoginForm />
+    </Suspense>
   )
 }
