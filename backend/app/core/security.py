@@ -30,11 +30,17 @@ def create_access_token(user_id: str, role: str) -> str:
     )
 
 
-def create_refresh_token(user_id: str) -> str:
-    return _create_token(
-        {"sub": user_id, "type": "refresh"},
-        timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
-    )
+def create_refresh_token(user_id: str, session_iat: datetime | None = None) -> str:
+    origin = session_iat or datetime.now(timezone.utc)
+    exp = origin + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    payload = {
+        "sub": user_id,
+        "type": "refresh",
+        "session_iat": origin.timestamp(),
+        "exp": exp,
+        "iat": datetime.now(timezone.utc),
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
 def decode_token(token: str) -> Optional[dict]:

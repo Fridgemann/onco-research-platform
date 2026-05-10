@@ -165,7 +165,7 @@ async def revoke_invite(
     invite.status = InviteStatus.REVOKED
 
     await write_audit_log(
-        db, AuditAction.COLLABORATOR_REMOVED,
+        db, AuditAction.INVITE_REVOKED,
         user_id=current_user.id,
         resource_type="workspace_invite",
         resource_id=invite.id,

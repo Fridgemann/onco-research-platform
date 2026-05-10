@@ -140,7 +140,6 @@ async def login(
         httponly=True,
         secure=settings.APP_ENV == "production",
         samesite="lax",
-        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
         path="/api/auth/refresh",
     )
 
@@ -167,6 +166,14 @@ async def refresh_token(
     if not payload or payload.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="Invalid or expired refresh token.")
 
+    # Enforce absolute session lifetime — reject if session_iat + 7 days has passed
+    session_iat_ts = payload.get("session_iat")
+    if session_iat_ts is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token.")
+    session_iat = datetime.fromtimestamp(session_iat_ts, tz=timezone.utc)
+    if datetime.now(timezone.utc) > session_iat + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS):
+        raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
+
     user_id = payload.get("sub")
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
@@ -175,7 +182,7 @@ async def refresh_token(
         raise HTTPException(status_code=401, detail="User not found or inactive.")
 
     new_access_token = create_access_token(user.id, user.role.value)
-    new_refresh_token = create_refresh_token(user.id)
+    new_refresh_token = create_refresh_token(user.id, session_iat=session_iat)
     await write_audit_log(db, AuditAction.TOKEN_REFRESHED, user_id=user.id, request=request)
 
     response.set_cookie(
@@ -184,7 +191,6 @@ async def refresh_token(
         httponly=True,
         secure=settings.APP_ENV == "production",
         samesite="lax",
-        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
         path="/api/auth/refresh",
     )
     return TokenResponse(

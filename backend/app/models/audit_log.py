@@ -23,6 +23,7 @@ class AuditAction(str, PyEnum):
     COLLABORATOR_INVITED = "collaborator_invited"
     COLLABORATOR_REMOVED = "collaborator_removed"
     INVITE_ACCEPTED = "invite_accepted"
+    INVITE_REVOKED = "invite_revoked"
     DATASET_UPLOADED = "dataset_uploaded"
     DATASET_DELETED = "dataset_deleted"
     DATASET_DOWNLOADED = "dataset_downloaded"
