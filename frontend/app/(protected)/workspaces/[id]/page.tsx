@@ -103,6 +103,10 @@ export default function WorkspacePage({
   const [inviteError, setInviteError] = useState<string | null>(null)
   const [newToken, setNewToken] = useState<string | null>(null)
   const [revoking, setRevoking] = useState<string | null>(null)
+  const [removing, setRemoving] = useState<string | null>(null)
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
+  const [leaving, setLeaving] = useState(false)
+  const [confirmLeave, setConfirmLeave] = useState(false)
 
   // Run analysis modal
   const [showAnalysis, setShowAnalysis] = useState(false)
@@ -245,6 +249,28 @@ export default function WorkspacePage({
       setInviteError(err instanceof ApiError ? err.message : 'Failed to create invite')
     } finally {
       setInviting(false)
+    }
+  }
+
+  async function handleLeave() {
+    setLeaving(true)
+    try {
+      await apiFetch(`/api/workspaces/${id}/members/me`, { method: 'DELETE' })
+      window.location.href = '/dashboard'
+    } catch {
+      setLeaving(false)
+    }
+  }
+
+  async function handleRemoveMember(memberId: string, userId: string) {
+    setRemoving(memberId)
+    try {
+      await apiFetch(`/api/workspaces/${id}/members/${userId}`, { method: 'DELETE' })
+      setMembers((prev) => prev.filter((m) => m.id !== memberId))
+    } catch {
+      // ignore — list stays stale but not harmful
+    } finally {
+      setRemoving(null)
     }
   }
 
@@ -489,9 +515,54 @@ export default function WorkspacePage({
                     letterSpacing: '0.05em',
                     textTransform: 'uppercase',
                     color: m.role === 'owner' ? 'var(--accent)' : 'var(--text-secondary)',
+                    marginRight: '12px',
                   }}>
                     {m.role}
                   </span>
+                  {/* Owner: remove button for non-self members */}
+                  {workspace && currentUser?.id === workspace.owner_id && m.user_id !== currentUser.id && (
+                    confirmRemove === m.id ? (
+                      <span style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                        <span style={{ fontSize: '11px', color: 'var(--text-secondary)', marginRight: '4px' }}>Sure?</span>
+                        <button
+                          className="btn btn-outline btn-sm"
+                          disabled={removing === m.id}
+                          onClick={() => { setConfirmRemove(null); handleRemoveMember(m.id, m.user_id) }}
+                        >
+                          {removing === m.id ? 'Removing…' : 'Yes'}
+                        </button>
+                        <button className="btn btn-outline btn-sm" onClick={() => setConfirmRemove(null)}>No</button>
+                      </span>
+                    ) : (
+                      <button
+                        className="btn btn-outline btn-sm"
+                        disabled={removing === m.id}
+                        onClick={() => setConfirmRemove(m.id)}
+                      >
+                        Remove
+                      </button>
+                    )
+                  )}
+                  {/* Collaborator: leave button only on own row */}
+                  {workspace && currentUser?.id !== workspace.owner_id && m.user_id === currentUser?.id && (
+                    confirmLeave ? (
+                      <span style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                        <span style={{ fontSize: '11px', color: 'var(--text-secondary)', marginRight: '4px' }}>Sure?</span>
+                        <button
+                          className="btn btn-outline btn-sm"
+                          disabled={leaving}
+                          onClick={() => { setConfirmLeave(false); handleLeave() }}
+                        >
+                          {leaving ? 'Leaving…' : 'Yes'}
+                        </button>
+                        <button className="btn btn-outline btn-sm" onClick={() => setConfirmLeave(false)}>No</button>
+                      </span>
+                    ) : (
+                      <button className="btn btn-outline btn-sm" onClick={() => setConfirmLeave(true)}>
+                        Leave
+                      </button>
+                    )
+                  )}
                 </div>
               ))}
 

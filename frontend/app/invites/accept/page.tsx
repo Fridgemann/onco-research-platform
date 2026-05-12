@@ -8,7 +8,7 @@ import { getToken, saveToken } from '@/lib/auth'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
-type PageState = 'checking' | 'unauthenticated' | 'ready' | 'submitting' | 'success' | 'error'
+type PageState = 'checking' | 'unauthenticated' | 'ready' | 'submitting' | 'declining' | 'success' | 'declined' | 'error'
 
 function AcceptInviteInner() {
   const searchParams = useSearchParams()
@@ -36,6 +36,18 @@ function AcceptInviteInner() {
       })
       .catch(() => setPageState('unauthenticated'))
   }, [token])
+
+  async function handleDecline() {
+    setPageState('declining')
+    setError(null)
+    try {
+      await apiFetch('/api/invites/decline', { method: 'POST', body: JSON.stringify({ token }) })
+      setPageState('declined')
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Something went wrong.')
+      setPageState('error')
+    }
+  }
 
   async function handleAccept() {
     setPageState('submitting')
@@ -98,6 +110,20 @@ function AcceptInviteInner() {
     )
   }
 
+  if (pageState === 'declined') {
+    return (
+      <>
+        <h2 className="display" style={{ fontSize: '24px', marginBottom: '8px' }}>Invitation declined</h2>
+        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '28px' }}>
+          You have declined this workspace invitation.
+        </p>
+        <Link href="/dashboard" className="btn btn-outline" style={{ display: 'inline-block' }}>
+          Go to dashboard
+        </Link>
+      </>
+    )
+  }
+
   if (pageState === 'error') {
     return (
       <>
@@ -119,13 +145,22 @@ function AcceptInviteInner() {
         Click below to accept and gain access.
       </p>
       {error && <div className="alert-error" style={{ marginBottom: '16px' }}>{error}</div>}
-      <button
-        className="btn btn-primary"
-        disabled={pageState === 'submitting'}
-        onClick={handleAccept}
-      >
-        {pageState === 'submitting' ? <><span className="spinner" /> Accepting…</> : 'Accept invitation'}
-      </button>
+      <div style={{ display: 'flex', gap: '10px' }}>
+        <button
+          className="btn btn-primary"
+          disabled={pageState === 'submitting' || pageState === 'declining'}
+          onClick={handleAccept}
+        >
+          {pageState === 'submitting' ? <><span className="spinner" /> Accepting…</> : 'Accept invitation'}
+        </button>
+        <button
+          className="btn btn-outline"
+          disabled={pageState === 'submitting' || pageState === 'declining'}
+          onClick={handleDecline}
+        >
+          {pageState === 'declining' ? <><span className="spinner" /> Declining…</> : 'Decline'}
+        </button>
+      </div>
     </>
   )
 }
