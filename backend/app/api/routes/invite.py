@@ -17,6 +17,8 @@ from app.schemas.invite import (
     InviteResponse,
     InviteAcceptRequest,
     InviteAcceptResponse,
+    InviteDeclineRequest,
+    InviteDeclineResponse,
 )
 from app.services.audit import write_audit_log
 from app.services.email import send_invite_email
@@ -235,3 +237,43 @@ async def accept_invite(
         workspace_id=invite.workspace_id,
         role="collaborator",
     )
+
+
+@invite_router.post("/decline", response_model=InviteDeclineResponse)
+async def decline_invite(
+    request: Request,
+    body: InviteDeclineRequest,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    token_hash = _hash_token(body.token)
+
+    result = await db.execute(
+        select(WorkspaceInvite).where(WorkspaceInvite.token_hash == token_hash)
+    )
+    invite = result.scalar_one_or_none()
+
+    if not invite:
+        raise HTTPException(status_code=400, detail="Invalid or expired invite token.")
+
+    if invite.status != InviteStatus.PENDING:
+        raise HTTPException(status_code=400, detail="This invite is no longer valid.")
+
+    if datetime.now(timezone.utc) > invite.expires_at:
+        raise HTTPException(status_code=400, detail="This invite has expired.")
+
+    if current_user.email_hash != invite.invited_email_hash:
+        raise HTTPException(status_code=403, detail="This invite was sent to a different email address.")
+
+    invite.status = InviteStatus.DECLINED
+    await db.flush()
+
+    await write_audit_log(
+        db, AuditAction.INVITE_DECLINED,
+        user_id=current_user.id,
+        resource_type="workspace_invite",
+        resource_id=invite.id,
+        request=request,
+    )
+
+    return InviteDeclineResponse(message="Invite declined.")

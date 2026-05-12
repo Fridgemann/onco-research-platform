@@ -184,3 +184,70 @@ async def delete_workspace(
         resource_id=workspace_id,
         request=request,
     )
+
+
+@router.delete("/{workspace_id}/members/me", status_code=204)
+async def leave_workspace(
+    request: Request,
+    workspace_id: str,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    workspace = await _get_workspace_or_404(workspace_id, db)
+
+    result = await db.execute(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == current_user.id,
+        )
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=404, detail="You are not a member of this workspace.")
+    if workspace.owner_id == current_user.id or member.role == MemberRole.OWNER:
+        raise HTTPException(status_code=400, detail="Workspace owner cannot leave. Transfer ownership or delete the workspace.")
+
+    await db.delete(member)
+
+    await write_audit_log(
+        db, AuditAction.COLLABORATOR_REMOVED,
+        user_id=current_user.id,
+        resource_type="workspace_member",
+        resource_id=member.id,
+        request=request,
+    )
+
+
+@router.delete("/{workspace_id}/members/{user_id}", status_code=204)
+async def remove_member(
+    request: Request,
+    workspace_id: str,
+    user_id: str,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    workspace = await _get_workspace_or_404(workspace_id, db)
+    await _require_owner(workspace, current_user)
+
+    if user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="Use DELETE /members/me to leave the workspace.")
+
+    result = await db.execute(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == user_id,
+        )
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=404, detail="Member not found.")
+
+    await db.delete(member)
+
+    await write_audit_log(
+        db, AuditAction.COLLABORATOR_REMOVED,
+        user_id=current_user.id,
+        resource_type="workspace_member",
+        resource_id=member.id,
+        request=request,
+    )

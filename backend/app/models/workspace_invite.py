@@ -10,6 +10,7 @@ class InviteStatus(str, PyEnum):
     PENDING = "pending"
     ACCEPTED = "accepted"
     REVOKED = "revoked"
+    DECLINED = "declined"
 
 
 class WorkspaceInvite(Base):

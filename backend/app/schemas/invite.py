@@ -33,3 +33,11 @@ class InviteAcceptResponse(BaseModel):
     message: str
     workspace_id: str
     role: str
+
+
+class InviteDeclineRequest(BaseModel):
+    token: str
+
+
+class InviteDeclineResponse(BaseModel):
+    message: str

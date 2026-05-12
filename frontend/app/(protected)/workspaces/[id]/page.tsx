@@ -477,32 +477,26 @@ export default function WorkspacePage({
         {/* Members tab */}
         {!loading && tab === 'members' && (
           <div className="card anim-fade-up">
-            {workspace && currentUser?.id !== workspace.owner_id ? (
-              <div style={{ padding: '48px 32px', textAlign: 'center' }}>
-                <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-                  Only the workspace owner can manage invites.
-                </p>
-              </div>
-            ) : (
-              <>
-                {/* Members list */}
-                {members.map((m) => (
-                  <div key={m.id} className="dataset-row">
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <span className="mono-sm" style={{ color: 'var(--text-primary)' }}>{m.email}</span>
-                    </div>
-                    <span style={{
-                      fontSize: '11px',
-                      letterSpacing: '0.05em',
-                      textTransform: 'uppercase',
-                      color: m.role === 'owner' ? 'var(--accent)' : 'var(--text-secondary)',
-                    }}>
-                      {m.role}
-                    </span>
+            <>
+              {/* Members list — visible to all members */}
+              {members.map((m) => (
+                <div key={m.id} className="dataset-row">
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <span className="mono-sm" style={{ color: 'var(--text-primary)' }}>{m.email}</span>
                   </div>
-                ))}
+                  <span style={{
+                    fontSize: '11px',
+                    letterSpacing: '0.05em',
+                    textTransform: 'uppercase',
+                    color: m.role === 'owner' ? 'var(--accent)' : 'var(--text-secondary)',
+                  }}>
+                    {m.role}
+                  </span>
+                </div>
+              ))}
 
-                {/* Invite form */}
+              {/* Invite form — owner only */}
+              {workspace && currentUser?.id === workspace.owner_id && (<>
                 <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--border)' }}>
                   <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                     Invite collaborator
@@ -562,6 +556,7 @@ export default function WorkspacePage({
                 )}
               </>
             )}
+            </>
           </div>
         )}
       </main>
