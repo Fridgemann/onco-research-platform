@@ -116,6 +116,8 @@ export default function WorkspacePage({
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null)
+  const [datasetColumns, setDatasetColumns] = useState<string[]>([])
+  const [columnsLoading, setColumnsLoading] = useState(false)
 
   useEffect(() => {
     async function load() {
@@ -144,6 +146,16 @@ export default function WorkspacePage({
   useEffect(() => {
     setJobParams({})
   }, [jobType])
+
+  // Fetch column names when selected dataset changes
+  useEffect(() => {
+    if (!jobDatasetId) return
+    setColumnsLoading(true)
+    apiFetch<{ columns: string[] }>(`/api/workspaces/${id}/datasets/${jobDatasetId}/columns`)
+      .then((data) => setDatasetColumns(data.columns))
+      .catch(() => setDatasetColumns([]))
+      .finally(() => setColumnsLoading(false))
+  }, [jobDatasetId, id])
 
   async function handleUpload(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -737,6 +749,23 @@ export default function WorkspacePage({
                     <option key={ds.id} value={ds.id}>{ds.filename}</option>
                   ))}
                 </select>
+                {columnsLoading && (
+                  <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '6px' }}>Loading columns…</p>
+                )}
+                {!columnsLoading && datasetColumns.length > 0 && (
+                  <div style={{ marginTop: '8px' }}>
+                    <p style={{ fontSize: '10px', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '5px' }}>
+                      Available columns
+                    </p>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                      {datasetColumns.map((col) => (
+                        <span key={col} style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: '3px', padding: '2px 6px', color: 'var(--text-secondary)' }}>
+                          {col}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div>
