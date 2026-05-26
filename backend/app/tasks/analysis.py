@@ -47,7 +47,7 @@ def _check_columns(df: pd.DataFrame, *col_lists: list[str]) -> None:
     if missing:
         raise ValueError(
             f"Column(s) not found: {missing}. "
-            f"Available columns: {df.columns.tolist()}"
+            "Check the available columns listed in the analysis form."
         )
 
 
