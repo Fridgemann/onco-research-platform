@@ -49,7 +49,11 @@ export async function apiFetch<T>(
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
-    throw new ApiError(res.status, body.detail ?? `HTTP ${res.status}`)
+    const detail = body.detail
+    const message = Array.isArray(detail)
+      ? detail.map((e: { msg: string }) => e.msg).join(', ')
+      : (detail ?? `HTTP ${res.status}`)
+    throw new ApiError(res.status, message)
   }
 
   if (res.status === 204) return undefined as T
