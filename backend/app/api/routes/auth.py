@@ -153,6 +153,7 @@ async def login(
             db, AuditAction.LOGIN_FAILED,
             status="failed", detail="Email not found", request=request,
         )
+        await db.commit()
         raise auth_error
 
     if user.locked_until and user.locked_until > datetime.now(timezone.utc):
@@ -160,6 +161,7 @@ async def login(
             db, AuditAction.LOGIN_FAILED, user_id=user.id,
             status="failed", detail="Account locked", request=request,
         )
+        await db.commit()
         raise auth_error  # generic 401 — don't confirm the account exists
 
     if not verify_password(body.password, user.hashed_password):
@@ -178,6 +180,7 @@ async def login(
                 detail=f"Wrong password (attempt {user.failed_login_attempts})",
                 request=request,
             )
+        await db.commit()
         raise auth_error
 
     user.failed_login_attempts = 0
