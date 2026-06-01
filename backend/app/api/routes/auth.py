@@ -13,6 +13,8 @@ from app.core.security import (
 from app.core.config import settings
 from app.core.rate_limit import limiter
 from app.models.user import User, UserRole
+from app.models.workspace import WorkspaceMember, MemberRole
+from app.models.workspace_invite import WorkspaceInvite, InviteStatus
 from app.models.audit_log import AuditAction
 from app.schemas.auth import (
     RegisterRequest, LoginRequest,
@@ -29,6 +31,10 @@ LOCKOUT_DURATION_MINUTES = 15
 
 def _hash_email(email: str) -> str:
     return hashlib.sha256(email.lower().encode()).hexdigest()
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def _user_to_response(user: User) -> UserResponse:
@@ -60,15 +66,58 @@ async def register(
             detail="If this email is not already registered, an account has been created.",
         )
 
+    invite = None
+    workspace_id = None
+
+    if body.invite_token:
+        token_hash = _hash_token(body.invite_token)
+        result = await db.execute(
+            select(WorkspaceInvite).where(WorkspaceInvite.token_hash == token_hash)
+        )
+        invite = result.scalar_one_or_none()
+
+        # Generic error — don't leak whether token exists or why it's invalid
+        if not invite or invite.status != InviteStatus.PENDING:
+            raise HTTPException(status_code=400, detail="Invalid or expired invite token.")
+        if datetime.now(timezone.utc) > invite.expires_at:
+            raise HTTPException(status_code=400, detail="Invalid or expired invite token.")
+        if invite.invited_email_hash != email_hash:
+            raise HTTPException(status_code=403, detail="This invite was sent to a different email address.")
+
+        workspace_id = invite.workspace_id
+
+    role = UserRole.COLLABORATOR if invite else UserRole.RESEARCHER
+
     user = User(
         email_encrypted=encrypt_field(body.email.lower()),
         full_name_encrypted=encrypt_field(body.full_name),
         email_hash=email_hash,
         hashed_password=hash_password(body.password),
-        role=UserRole.RESEARCHER,
+        role=role,
     )
     db.add(user)
     await db.flush()
+
+    if invite:
+        member = WorkspaceMember(
+            workspace_id=invite.workspace_id,
+            user_id=user.id,
+            role=MemberRole.COLLABORATOR,
+            invited_by=invite.invited_by,
+            joined_at=datetime.now(timezone.utc),
+        )
+        db.add(member)
+
+        invite.status = InviteStatus.ACCEPTED
+        invite.accepted_at = datetime.now(timezone.utc)
+
+        await write_audit_log(
+            db, AuditAction.INVITE_ACCEPTED,
+            user_id=user.id,
+            resource_type="workspace_invite",
+            resource_id=invite.id,
+            request=request,
+        )
 
     await write_audit_log(
         db, AuditAction.REGISTER,
@@ -78,7 +127,11 @@ async def register(
         request=request,
     )
 
-    return RegisterResponse(message="Registration successful.", user=_user_to_response(user))
+    return RegisterResponse(
+        message="Registration successful.",
+        user=_user_to_response(user),
+        workspace_id=workspace_id,
+    )
 
 
 @router.post("/login", response_model=TokenResponse)

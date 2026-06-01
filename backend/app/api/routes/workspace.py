@@ -8,8 +8,8 @@ from app.models.workspace import Workspace, WorkspaceMember, MemberRole
 from app.models.audit_log import AuditAction
 from app.schemas.workspace import WorkspaceCreate, WorkspaceUpdate, WorkspaceResponse, WorkspaceMemberResponse
 from app.services.audit import write_audit_log
-from app.api.dependencies import CurrentUser
-from app.models.user import User
+from app.api.dependencies import CurrentUser, require_role
+from app.models.user import User, UserRole
 from app.core.security import decrypt_field
 
 router = APIRouter(prefix="/workspaces", tags=["Workspaces"])
@@ -32,7 +32,7 @@ async def _require_owner(workspace: Workspace, current_user: User) -> None:
 async def create_workspace(
     request: Request,
     body: WorkspaceCreate,
-    current_user: CurrentUser,
+    current_user: User = Depends(require_role(UserRole.ADMIN, UserRole.RESEARCHER)),
     db: AsyncSession = Depends(get_db),
 ):
     workspace = Workspace(

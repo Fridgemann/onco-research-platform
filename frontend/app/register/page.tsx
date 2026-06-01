@@ -1,13 +1,16 @@
 'use client'
 
-import { useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useState, Suspense } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { apiFetch, ApiError } from '@/lib/api'
 import { saveToken } from '@/lib/auth'
 
-export default function RegisterPage() {
+function RegisterForm() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const inviteToken = searchParams.get('invite_token') ?? undefined
+
   const [form, setForm] = useState({ email: '', full_name: '', password: '' })
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -22,16 +25,25 @@ export default function RegisterPage() {
     setLoading(true)
     setError(null)
     try {
-      await apiFetch('/api/auth/register', {
+      const body: Record<string, string> = { ...form }
+      if (inviteToken) body.invite_token = inviteToken
+
+      const registerData = await apiFetch<{ workspace_id?: string | null }>('/api/auth/register', {
         method: 'POST',
-        body: JSON.stringify(form),
+        body: JSON.stringify(body),
       })
+
       const loginData = await apiFetch<{ access_token: string }>('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({ email: form.email, password: form.password }),
       })
       saveToken(loginData.access_token)
-      router.push('/dashboard')
+
+      if (registerData.workspace_id) {
+        router.push(`/workspaces/${registerData.workspace_id}`)
+      } else {
+        router.push('/dashboard')
+      }
     } catch (err) {
       if (err instanceof ApiError) setError(err.message)
       else setError('Something went wrong')
@@ -47,6 +59,118 @@ export default function RegisterPage() {
     { label: 'Special character', ok: /[!@#$%^&*(),.?":{}|<>]/.test(form.password) },
   ]
 
+  return (
+    <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+      {inviteToken && (
+        <div
+          style={{
+            background: 'var(--bg-surface)',
+            border: '1px solid var(--border)',
+            borderRadius: '6px',
+            padding: '10px 14px',
+            fontSize: '12px',
+            color: 'var(--text-secondary)',
+          }}
+        >
+          You were invited to a workspace. Registering will automatically add you as a collaborator.
+        </div>
+      )}
+
+      <div className="anim-fade-up-2">
+        <label className="field-label" htmlFor="full_name">Full name</label>
+        <input
+          id="full_name"
+          type="text"
+          required
+          autoComplete="name"
+          value={form.full_name}
+          onChange={set('full_name')}
+          className="field-input"
+          placeholder="Dr. Jane Smith"
+        />
+      </div>
+
+      <div className="anim-fade-up-3">
+        <label className="field-label" htmlFor="email">Email address</label>
+        <input
+          id="email"
+          type="email"
+          required
+          autoComplete="email"
+          value={form.email}
+          onChange={set('email')}
+          className="field-input"
+          placeholder="researcher@institution.org"
+        />
+      </div>
+
+      <div className="anim-fade-up-4">
+        <label className="field-label" htmlFor="password">Password</label>
+        <input
+          id="password"
+          type="password"
+          required
+          autoComplete="new-password"
+          value={form.password}
+          onChange={set('password')}
+          className="field-input"
+        />
+
+        {form.password.length > 0 && (
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gap: '5px',
+              marginTop: '10px',
+            }}
+          >
+            {passwordRules.map((r) => (
+              <div
+                key={r.label}
+                style={{
+                  display: 'flex',
+                  gap: '6px',
+                  alignItems: 'center',
+                  fontSize: '11px',
+                  color: r.ok ? 'var(--status-completed-fg)' : 'var(--text-secondary)',
+                  transition: 'color 0.2s',
+                }}
+              >
+                <span>{r.ok ? '✓' : '○'}</span>
+                {r.label}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <div className="alert-error anim-fade-up">{error}</div>
+      )}
+
+      <div className="anim-fade-up-5">
+        <button
+          type="submit"
+          disabled={loading}
+          className="btn btn-primary"
+          style={{ width: '100%' }}
+        >
+          {loading ? (
+            <>
+              <span className="spinner" />
+              Creating account…
+            </>
+          ) : (
+            'Create account'
+          )}
+        </button>
+      </div>
+    </form>
+  )
+}
+
+export default function RegisterPage() {
   return (
     <div className="min-h-screen flex auth-texture" style={{ background: 'var(--bg-base)' }}>
       {/* Left — branding */}
@@ -114,98 +238,9 @@ export default function RegisterPage() {
             </p>
           </div>
 
-          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            <div className="anim-fade-up-2">
-              <label className="field-label" htmlFor="full_name">Full name</label>
-              <input
-                id="full_name"
-                type="text"
-                required
-                autoComplete="name"
-                value={form.full_name}
-                onChange={set('full_name')}
-                className="field-input"
-                placeholder="Dr. Jane Smith"
-              />
-            </div>
-
-            <div className="anim-fade-up-3">
-              <label className="field-label" htmlFor="email">Email address</label>
-              <input
-                id="email"
-                type="email"
-                required
-                autoComplete="email"
-                value={form.email}
-                onChange={set('email')}
-                className="field-input"
-                placeholder="researcher@institution.org"
-              />
-            </div>
-
-            <div className="anim-fade-up-4">
-              <label className="field-label" htmlFor="password">Password</label>
-              <input
-                id="password"
-                type="password"
-                required
-                autoComplete="new-password"
-                value={form.password}
-                onChange={set('password')}
-                className="field-input"
-              />
-
-              {form.password.length > 0 && (
-                <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: '1fr 1fr',
-                    gap: '5px',
-                    marginTop: '10px',
-                  }}
-                >
-                  {passwordRules.map((r) => (
-                    <div
-                      key={r.label}
-                      style={{
-                        display: 'flex',
-                        gap: '6px',
-                        alignItems: 'center',
-                        fontSize: '11px',
-                        color: r.ok ? 'var(--status-completed-fg)' : 'var(--text-secondary)',
-                        transition: 'color 0.2s',
-                      }}
-                    >
-                      <span>{r.ok ? '✓' : '○'}</span>
-                      {r.label}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {error && (
-              <div className="alert-error anim-fade-up">{error}</div>
-            )}
-
-            <div className="anim-fade-up-5">
-              <button
-                type="submit"
-                disabled={loading}
-                className="btn btn-primary"
-                style={{ width: '100%' }}
-              >
-                {loading ? (
-                  <>
-                    <span className="spinner" />
-                    Creating account…
-                  </>
-                ) : (
-                  'Create account'
-                )}
-              </button>
-            </div>
-          </form>
+          <Suspense fallback={null}>
+            <RegisterForm />
+          </Suspense>
 
           <div style={{ marginTop: '24px', textAlign: 'center' }}>
             <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>

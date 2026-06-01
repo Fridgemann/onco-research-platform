@@ -8,6 +8,7 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     full_name: str
     password: str
+    invite_token: str | None = None
 
     @field_validator("password")
     @classmethod
@@ -62,3 +63,4 @@ class UserResponse(BaseModel):
 class RegisterResponse(BaseModel):
     message: str
     user: UserResponse
+    workspace_id: str | None = None

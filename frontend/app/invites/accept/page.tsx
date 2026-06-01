@@ -79,15 +79,24 @@ function AcceptInviteInner() {
       <>
         <h2 className="display" style={{ fontSize: '24px', marginBottom: '8px' }}>You have been invited</h2>
         <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '28px' }}>
-          Sign in to accept your invitation to this research workspace.
+          Sign in to accept your invitation, or create a new account — your invite will be applied automatically.
         </p>
-        <Link
-          href={`/login?next=/invites/accept?token=${encodeURIComponent(token)}`}
-          className="btn btn-primary"
-          style={{ display: 'inline-block' }}
-        >
-          Sign in to accept
-        </Link>
+        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+          <Link
+            href={`/login?next=/invites/accept?token=${encodeURIComponent(token)}`}
+            className="btn btn-primary"
+            style={{ display: 'inline-block' }}
+          >
+            Sign in to accept
+          </Link>
+          <Link
+            href={`/register?invite_token=${encodeURIComponent(token)}`}
+            className="btn btn-outline"
+            style={{ display: 'inline-block' }}
+          >
+            Create account
+          </Link>
+        </div>
       </>
     )
   }

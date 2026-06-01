@@ -25,6 +25,7 @@ from app.main import app
 from app.api.dependencies import get_current_user
 from app.core.database import get_db
 from app.models.workspace_invite import InviteStatus
+from app.models.user import UserRole
 from app.core.security import encrypt_field
 
 from tests.conftest import (
@@ -349,6 +350,26 @@ class TestAcceptInvite:
         async with client_as(make_user(OTHER_USER_ID, VALID_EMAIL), db) as ac:
             resp = await ac.post(ACCEPT_URL, json={"token": VALID_TOKEN})
         assert resp.status_code == 400
+
+    async def test_accept_does_not_mutate_caller_role(self):
+        """Accepting an invite must not change the caller's platform role.
+
+        Guards against future regressions where accept_invite might assign
+        UserRole.COLLABORATOR to the authenticated user object.
+        """
+        db = make_db_multi(
+            _execute_result(scalar=make_invite()),
+            _execute_result(scalar=None),  # not already a member
+        )
+        user = make_user(OTHER_USER_ID, VALID_EMAIL)
+        user.role = UserRole.RESEARCHER
+        original_role = user.role
+
+        async with client_as(user, db) as ac:
+            resp = await ac.post(ACCEPT_URL, json={"token": VALID_TOKEN})
+
+        assert resp.status_code == 200
+        assert user.role == original_role
 
     async def test_already_member_is_idempotent(self):
         """Second accept (race condition / retry) succeeds without duplicate insert."""

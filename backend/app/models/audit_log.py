@@ -31,6 +31,7 @@ class AuditAction(str, PyEnum):
     ANALYSIS_STARTED = "analysis_started"
     ANALYSIS_COMPLETED = "analysis_completed"
     ANALYSIS_FAILED = "analysis_failed"
+    USER_DEACTIVATED = "user_deactivated"
 
 
 class AuditLog(Base):
