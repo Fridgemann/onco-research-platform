@@ -10,8 +10,5 @@ limiter = Limiter(key_func=get_remote_address)
 def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
     return JSONResponse(
         status_code=429,
-        content={
-            "detail": "Too many requests. Please slow down.",
-            "retry_after": str(exc.retry_after),
-        },
+        content={"detail": "Too many requests. Please slow down."},
     )

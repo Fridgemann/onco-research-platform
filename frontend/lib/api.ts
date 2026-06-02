@@ -25,11 +25,12 @@ async function doFetch(path: string, options: RequestInit, token: string | null)
 
 export async function apiFetch<T>(
   path: string,
-  options: RequestInit = {},
+  options: RequestInit & { skipRefresh?: boolean } = {},
 ): Promise<T> {
-  let res = await doFetch(path, options, getToken())
+  const { skipRefresh, ...fetchOptions } = options
+  let res = await doFetch(path, fetchOptions, getToken())
 
-  if (res.status === 401) {
+  if (res.status === 401 && !skipRefresh) {
     // Attempt silent refresh using the httpOnly refresh cookie
     const refreshRes = await fetch(`${API_BASE}/api/auth/refresh`, {
       method: 'POST',
@@ -39,7 +40,7 @@ export async function apiFetch<T>(
     if (refreshRes.ok) {
       const { access_token } = await refreshRes.json()
       saveToken(access_token)
-      res = await doFetch(path, options, access_token)
+      res = await doFetch(path, fetchOptions, access_token)
     } else {
       clearToken()
       if (typeof window !== 'undefined') window.location.href = '/login'

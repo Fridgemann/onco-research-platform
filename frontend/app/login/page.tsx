@@ -18,11 +18,11 @@ function LoginForm() {
   async function handleSubmit(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault()
     setLoading(true)
-    setError(null)
     try {
       const data = await apiFetch<{ access_token: string }>('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({ email, password }),
+        skipRefresh: true,
       })
       saveToken(data.access_token)
       router.push(next)

@@ -23,7 +23,6 @@ function RegisterForm() {
   async function handleSubmit(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault()
     setLoading(true)
-    setError(null)
     try {
       const body: Record<string, string> = { ...form }
       if (inviteToken) body.invite_token = inviteToken
@@ -31,11 +30,13 @@ function RegisterForm() {
       const registerData = await apiFetch<{ workspace_id?: string | null }>('/api/auth/register', {
         method: 'POST',
         body: JSON.stringify(body),
+        skipRefresh: true,
       })
 
       const loginData = await apiFetch<{ access_token: string }>('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({ email: form.email, password: form.password }),
+        skipRefresh: true,
       })
       saveToken(loginData.access_token)
 
