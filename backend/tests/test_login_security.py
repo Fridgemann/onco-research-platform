@@ -41,11 +41,11 @@ def _email_hash(email: str) -> str:
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def make_login_user(failed_attempts: int = 0, locked_until=None):
+def make_login_user(failed_attempts: int = 0, locked_until=None, is_active: bool = True):
     u = MagicMock()
     u.id = USER_ID
     u.role = UserRole.RESEARCHER
-    u.is_active = True
+    u.is_active = is_active
     u.email_hash = _email_hash(VALID_EMAIL)
     u.hashed_password = hash_password(VALID_PASSWORD)
     u.failed_login_attempts = failed_attempts
@@ -132,6 +132,16 @@ class TestFailedLoginPersistence:
         async with anon_client(db) as ac:
             resp = await ac.post(LOGIN_URL, json=_body())
         assert resp.status_code == 401
+        db.commit.assert_called_once()
+
+    async def test_inactive_account_rejected_before_token_issued(self):
+        """Deactivated user must get 401 — no token should ever be issued."""
+        user = make_login_user(is_active=False)
+        db = make_login_db(user)
+        async with anon_client(db) as ac:
+            resp = await ac.post(LOGIN_URL, json=_body(VALID_PASSWORD))
+        assert resp.status_code == 401
+        assert "access_token" not in resp.json()
         db.commit.assert_called_once()
 
     async def test_successful_login_resets_attempts(self):

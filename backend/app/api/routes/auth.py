@@ -213,6 +213,14 @@ async def login(
         await db.commit()
         raise auth_error
 
+    if not user.is_active:
+        await write_audit_log(
+            db, AuditAction.LOGIN_FAILED, user_id=user.id,
+            status="failed", detail="Account inactive", request=request,
+        )
+        await db.commit()
+        raise auth_error
+
     user.failed_login_attempts = 0
     user.locked_until = None
     user.last_login = datetime.now(timezone.utc)
