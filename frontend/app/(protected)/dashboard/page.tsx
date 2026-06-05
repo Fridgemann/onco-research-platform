@@ -4,13 +4,14 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { apiFetch, ApiError } from '@/lib/api'
 import { clearToken } from '@/lib/auth'
-import type { Workspace, User } from '@/lib/types'
+import { useUser } from '@/lib/user-context'
+import type { Workspace } from '@/lib/types'
 
 type NewWsForm = { name: string; description: string }
 
 export default function DashboardPage() {
   const router = useRouter()
-  const [user, setUser] = useState<User | null>(null)
+  const user = useUser()
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -19,14 +20,12 @@ export default function DashboardPage() {
   const [createError, setCreateError] = useState<string | null>(null)
   const [newWs, setNewWs] = useState<NewWsForm>({ name: '', description: '' })
 
+  const canCreateWorkspace = user.role === 'admin' || user.role === 'researcher'
+
   useEffect(() => {
     async function load() {
       try {
-        const [me, wsList] = await Promise.all([
-          apiFetch<User>('/api/auth/me'),
-          apiFetch<Workspace[]>('/api/workspaces'),
-        ])
-        setUser(me)
+        const wsList = await apiFetch<Workspace[]>('/api/workspaces')
         setWorkspaces(wsList)
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'Failed to load')
@@ -149,12 +148,14 @@ export default function DashboardPage() {
             </p>
           </div>
 
-          <button
-            className="btn btn-primary anim-fade-up"
-            onClick={() => setShowModal(true)}
-          >
-            + New workspace
-          </button>
+          {canCreateWorkspace && (
+            <button
+              className="btn btn-primary anim-fade-up"
+              onClick={() => setShowModal(true)}
+            >
+              + New workspace
+            </button>
+          )}
         </div>
 
         {/* Error */}
@@ -181,23 +182,25 @@ export default function DashboardPage() {
         {!loading && !error && workspaces.length === 0 && (
           <div
             className="card anim-fade-up"
-            style={{
-              padding: '56px 32px',
-              textAlign: 'center',
-            }}
+            style={{ padding: '56px 32px', textAlign: 'center' }}
           >
             <p className="display" style={{ fontSize: '24px', marginBottom: '10px', color: 'var(--text-secondary)' }}>
               No workspaces yet
             </p>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '12px', marginBottom: '24px' }}>
-              Create your first workspace to start uploading datasets and running analyses.
-            </p>
-            <button
-              className="btn btn-outline"
-              onClick={() => setShowModal(true)}
-            >
-              Create workspace
-            </button>
+            {canCreateWorkspace ? (
+              <>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '12px', marginBottom: '24px' }}>
+                  Create your first workspace to start uploading datasets and running analyses.
+                </p>
+                <button className="btn btn-outline" onClick={() => setShowModal(true)}>
+                  Create workspace
+                </button>
+              </>
+            ) : (
+              <p style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>
+                You will be added here when a researcher invites you to their workspace.
+              </p>
+            )}
           </div>
         )}
 
@@ -237,7 +240,7 @@ export default function DashboardPage() {
       </main>
 
       {/* New workspace modal */}
-      {showModal && (
+      {showModal && canCreateWorkspace && (
         <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowModal(false)}>
           <div className="modal">
             <p className="modal-title">New workspace</p>

@@ -3,6 +3,9 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { getToken, saveToken, clearToken } from '@/lib/auth'
+import { apiFetch } from '@/lib/api'
+import { UserContext } from '@/lib/user-context'
+import type { User } from '@/lib/types'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
@@ -15,37 +18,42 @@ export default function ProtectedLayout({
 }) {
   const router = useRouter()
   const [status, setStatus] = useState<AuthStatus>('loading')
+  const [user, setUser] = useState<User | null>(null)
 
   useEffect(() => {
-    // TODO(human): implement the async auth initialization here.
-    // If the token is already in memory, we're good — set status to 'ok'.
-    // If not (e.g. page was refreshed, memory cleared), attempt a silent
-    // token refresh using the httpOnly refresh cookie. On success, save
-    // the new access_token and set status 'ok'. On failure, clear the
-    // token and set status 'out'.
-    if (getToken()) {
-      setStatus('ok');
-      return;
-    }
-    fetch(`${API_BASE}/api/auth/refresh`, { method: 'POST', credentials:'include' })
-      .then(async (res) => {
-        if (res.ok) {
-          const { access_token } = await res.json();
-          saveToken(access_token);
-          setStatus('ok');
-        } else {
-          clearToken()
-          setStatus('out');
+    async function init() {
+      try {
+        if (!getToken()) {
+          const res = await fetch(`${API_BASE}/api/auth/refresh`, {
+            method: 'POST',
+            credentials: 'include',
+          })
+          if (!res.ok) { clearToken(); setStatus('out'); return }
+          const { access_token } = await res.json()
+          saveToken(access_token)
         }
-      })
-      .catch(() => { clearToken(); setStatus('out'); })
+
+        const me = await apiFetch<User>('/api/auth/me')
+        if (!me.is_active) { clearToken(); setStatus('out'); return }
+        setUser(me)
+        setStatus('ok')
+      } catch {
+        clearToken()
+        setStatus('out')
+      }
+    }
+    init()
   }, [])
 
   useEffect(() => {
     if (status === 'out') router.replace('/login')
   }, [status, router])
 
-  if (status !== 'ok') return null
+  if (status !== 'ok' || !user) return null
 
-  return <>{children}</>
+  return (
+    <UserContext.Provider value={{ user }}>
+      {children}
+    </UserContext.Provider>
+  )
 }
