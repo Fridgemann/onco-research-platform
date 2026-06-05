@@ -44,7 +44,7 @@ export default function DescriptiveStatsTable({ data }: { data: Record<string, R
 function thStyle({ left }: { left?: boolean }) {
   return {
     padding: '8px 12px',
-    textAlign: (left ? 'left' : 'right') as const,
+    textAlign: (left ? 'left' : 'right') as 'left' | 'right',
     color: '#7a8399',
     fontFamily: 'var(--font-mono)',
     fontSize: '10px',

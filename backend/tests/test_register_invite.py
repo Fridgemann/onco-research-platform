@@ -123,12 +123,12 @@ def _body(**overrides):
 
 class TestNormalRegister:
 
-    async def test_creates_researcher_role(self):
+    async def test_creates_collaborator_role(self):
         db = make_register_db(_execute_result(scalar=None))
         async with anon_client(db) as ac:
             resp = await ac.post(REGISTER_URL, json=_body())
         assert resp.status_code == 201
-        assert resp.json()["user"]["role"] == "researcher"
+        assert resp.json()["user"]["role"] == "collaborator"
         assert resp.json()["workspace_id"] is None
 
     async def test_duplicate_email_returns_409(self):

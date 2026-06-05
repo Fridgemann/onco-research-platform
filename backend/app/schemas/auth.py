@@ -9,6 +9,7 @@ class RegisterRequest(BaseModel):
     full_name: str
     password: str
     invite_token: str | None = None
+    researcher_invite_token: str | None = None
 
     @field_validator("password")
     @classmethod

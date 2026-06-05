@@ -66,8 +66,8 @@ export default function KMCurveChart({ data }: { data: KMData }) {
             contentStyle={{ background: '#0f1623', border: '1px solid #1e2433', borderRadius: '6px', fontSize: '11px', fontFamily: 'monospace' }}
             labelStyle={{ color: '#7a8399' }}
             itemStyle={{ color: '#b8a99a' }}
-            formatter={(v: number, name: string) => [`${(v * 100).toFixed(1)}%`, name]}
-            labelFormatter={(t: number) => `t = ${t}`}
+            formatter={(v, name) => [typeof v === 'number' ? `${(v * 100).toFixed(1)}%` : v, name]}
+            labelFormatter={(t) => `t = ${t}`}
           />
           {groups.length > 1 && <Legend wrapperStyle={{ fontSize: '11px', fontFamily: 'monospace', color: '#b8a99a' }} />}
           {groups.map((g, i) => (

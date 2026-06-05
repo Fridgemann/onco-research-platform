@@ -13,6 +13,7 @@ from app.models.user import User
 from app.models.audit_log import AuditLog
 from app.models.workspace import Workspace, WorkspaceMember
 from app.models.workspace_invite import WorkspaceInvite
+from app.models.researcher_invite import ResearcherInvite
 from app.models.dataset import Dataset
 from app.models.analysis_job import AnalysisJob
 from app.core.config import settings

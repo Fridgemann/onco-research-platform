@@ -15,6 +15,7 @@ from app.core.rate_limit import limiter
 from app.models.user import User, UserRole
 from app.models.workspace import WorkspaceMember, MemberRole
 from app.models.workspace_invite import WorkspaceInvite, InviteStatus
+from app.models.researcher_invite import ResearcherInvite, ResearcherInviteStatus
 from app.models.audit_log import AuditAction
 from app.schemas.auth import (
     RegisterRequest, LoginRequest,
@@ -66,7 +67,8 @@ async def register(
             detail="If this email is not already registered, an account has been created.",
         )
 
-    invite = None
+    workspace_invite = None
+    researcher_invite = None
     workspace_id = None
 
     if body.invite_token:
@@ -74,19 +76,35 @@ async def register(
         result = await db.execute(
             select(WorkspaceInvite).where(WorkspaceInvite.token_hash == token_hash)
         )
-        invite = result.scalar_one_or_none()
+        workspace_invite = result.scalar_one_or_none()
 
-        # Generic error — don't leak whether token exists or why it's invalid
-        if not invite or invite.status != InviteStatus.PENDING:
+        if not workspace_invite or workspace_invite.status != InviteStatus.PENDING:
             raise HTTPException(status_code=400, detail="Invalid or expired invite token.")
-        if datetime.now(timezone.utc) > invite.expires_at:
+        if datetime.now(timezone.utc) > workspace_invite.expires_at:
             raise HTTPException(status_code=400, detail="Invalid or expired invite token.")
-        if invite.invited_email_hash != email_hash:
+        if workspace_invite.invited_email_hash != email_hash:
             raise HTTPException(status_code=403, detail="This invite was sent to a different email address.")
 
-        workspace_id = invite.workspace_id
+        workspace_id = workspace_invite.workspace_id
 
-    role = UserRole.COLLABORATOR if invite else UserRole.RESEARCHER
+    elif body.researcher_invite_token:
+        token_hash = _hash_token(body.researcher_invite_token)
+        result = await db.execute(
+            select(ResearcherInvite).where(ResearcherInvite.token_hash == token_hash)
+        )
+        researcher_invite = result.scalar_one_or_none()
+
+        if not researcher_invite or researcher_invite.status != ResearcherInviteStatus.PENDING:
+            raise HTTPException(status_code=400, detail="Invalid or expired invite token.")
+        if datetime.now(timezone.utc) > researcher_invite.expires_at:
+            raise HTTPException(status_code=400, detail="Invalid or expired invite token.")
+        if researcher_invite.invited_email_hash != email_hash:
+            raise HTTPException(status_code=403, detail="This invite was sent to a different email address.")
+
+    if researcher_invite:
+        role = UserRole.RESEARCHER
+    else:
+        role = UserRole.COLLABORATOR
 
     user = User(
         email_encrypted=encrypt_field(body.email.lower()),
@@ -98,24 +116,36 @@ async def register(
     db.add(user)
     await db.flush()
 
-    if invite:
+    if workspace_invite:
         member = WorkspaceMember(
-            workspace_id=invite.workspace_id,
+            workspace_id=workspace_invite.workspace_id,
             user_id=user.id,
             role=MemberRole.COLLABORATOR,
-            invited_by=invite.invited_by,
+            invited_by=workspace_invite.invited_by,
             joined_at=datetime.now(timezone.utc),
         )
         db.add(member)
 
-        invite.status = InviteStatus.ACCEPTED
-        invite.accepted_at = datetime.now(timezone.utc)
+        workspace_invite.status = InviteStatus.ACCEPTED
+        workspace_invite.accepted_at = datetime.now(timezone.utc)
 
         await write_audit_log(
             db, AuditAction.INVITE_ACCEPTED,
             user_id=user.id,
             resource_type="workspace_invite",
-            resource_id=invite.id,
+            resource_id=workspace_invite.id,
+            request=request,
+        )
+
+    if researcher_invite:
+        researcher_invite.status = ResearcherInviteStatus.ACCEPTED
+        researcher_invite.accepted_at = datetime.now(timezone.utc)
+
+        await write_audit_log(
+            db, AuditAction.RESEARCHER_INVITE_ACCEPTED,
+            user_id=user.id,
+            resource_type="researcher_invite",
+            resource_id=researcher_invite.id,
             request=request,
         )
 

@@ -10,6 +10,7 @@ function RegisterForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const inviteToken = searchParams.get('invite_token') ?? undefined
+  const researcherInviteToken = searchParams.get('researcher_invite') ?? undefined
 
   const [form, setForm] = useState({ email: '', full_name: '', password: '' })
   const [error, setError] = useState<string | null>(null)
@@ -26,6 +27,7 @@ function RegisterForm() {
     try {
       const body: Record<string, string> = { ...form }
       if (inviteToken) body.invite_token = inviteToken
+      if (researcherInviteToken) body.researcher_invite_token = researcherInviteToken
 
       const registerData = await apiFetch<{ workspace_id?: string | null }>('/api/auth/register', {
         method: 'POST',
@@ -62,7 +64,7 @@ function RegisterForm() {
 
   return (
     <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-      {inviteToken && (
+      {(inviteToken || researcherInviteToken) && (
         <div
           style={{
             background: 'var(--bg-surface)',
@@ -73,7 +75,9 @@ function RegisterForm() {
             color: 'var(--text-secondary)',
           }}
         >
-          You were invited to a workspace. Registering will automatically add you as a collaborator.
+          {researcherInviteToken
+            ? 'You have been invited to join as a researcher. Registering will grant you full researcher access.'
+            : 'You were invited to a workspace. Registering will automatically add you as a collaborator.'}
         </div>
       )}
 

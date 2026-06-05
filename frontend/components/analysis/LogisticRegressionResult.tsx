@@ -42,7 +42,7 @@ export default function LogisticRegressionResult({ data }: { data: LogisticData 
               contentStyle={{ background: '#0f1623', border: '1px solid #1e2433', borderRadius: '6px', fontSize: '11px', fontFamily: 'monospace' }}
               labelStyle={{ color: '#c88828' }}
               itemStyle={{ color: '#b8a99a' }}
-              formatter={(v: number) => [v.toFixed(4), 'coefficient']}
+              formatter={(v) => [typeof v === 'number' ? v.toFixed(4) : v, 'coefficient']}
             />
             <ReferenceLine x={0} stroke="#2a3042" />
             <Bar dataKey="value" radius={[0, 3, 3, 0]}>
