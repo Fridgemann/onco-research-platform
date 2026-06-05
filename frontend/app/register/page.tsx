@@ -91,7 +91,7 @@ function RegisterForm() {
           value={form.full_name}
           onChange={set('full_name')}
           className="field-input"
-          placeholder="Dr. Jane Smith"
+          placeholder="Jane Smith"
         />
       </div>
 
@@ -105,7 +105,7 @@ function RegisterForm() {
           value={form.email}
           onChange={set('email')}
           className="field-input"
-          placeholder="researcher@institution.org"
+          placeholder="you@institution.org"
         />
       </div>
 
@@ -195,9 +195,9 @@ export default function RegisterPage() {
           </h1>
 
           <p style={{ color: 'var(--text-secondary)', fontSize: '13px', lineHeight: 1.8, maxWidth: '340px' }}>
-            Create your researcher account to start uploading datasets,
-            running survival analyses, and collaborating with your team
-            in secure, audit-logged workspaces.
+            Join workspaces, collaborate with your team, and contribute
+            to research — all within a security-first environment built
+            for clinical data.
           </p>
         </div>
 
@@ -239,7 +239,7 @@ export default function RegisterPage() {
               Create account
             </h2>
             <p style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>
-              Researcher access — all fields required
+              All fields required
             </p>
           </div>
 
