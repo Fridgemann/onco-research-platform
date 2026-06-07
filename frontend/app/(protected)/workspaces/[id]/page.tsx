@@ -4,7 +4,8 @@ import { useEffect, useState, use, useRef } from 'react'
 import Link from 'next/link'
 import { apiFetch, ApiError } from '@/lib/api'
 import { getToken } from '@/lib/auth'
-import type { Dataset, AnalysisJob, Workspace, WorkspaceInvite, WorkspaceMember, User } from '@/lib/types'
+import { useUser } from '@/lib/user-context'
+import type { Dataset, AnalysisJob, Workspace, WorkspaceInvite, WorkspaceMember } from '@/lib/types'
 import ResultPanel from '@/components/analysis/ResultPanel'
 
 type Tab = 'datasets' | 'analysis' | 'members'
@@ -91,8 +92,7 @@ export default function WorkspacePage({
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
 
-  // Current user (for owner check)
-  const [currentUser, setCurrentUser] = useState<User | null>(null)
+  const currentUser = useUser()
 
   // Members / invites tab
   const [members, setMembers] = useState<WorkspaceMember[]>([])
@@ -122,16 +122,14 @@ export default function WorkspacePage({
   useEffect(() => {
     async function load() {
       try {
-        const [ws, ds, js, me] = await Promise.all([
+        const [ws, ds, js] = await Promise.all([
           apiFetch<Workspace>(`/api/workspaces/${id}`),
           apiFetch<Dataset[]>(`/api/workspaces/${id}/datasets`),
           apiFetch<AnalysisJob[]>(`/api/analysis?workspace_id=${id}`),
-          apiFetch<User>('/api/auth/me'),
         ])
         setWorkspace(ws)
         setDatasets(ds)
         setJobs(js)
-        setCurrentUser(me)
         if (ds.length > 0) setJobDatasetId(ds[0].id)
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'Failed to load workspace')
