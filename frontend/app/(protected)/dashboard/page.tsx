@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 import { apiFetch, ApiError } from '@/lib/api'
 import { clearToken } from '@/lib/auth'
 import { useUser } from '@/lib/user-context'
@@ -89,6 +90,14 @@ export default function DashboardPage() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          {user.role === 'admin' && (
+            <Link
+              href="/admin"
+              style={{ fontSize: '11px', color: 'var(--text-secondary)', textDecoration: 'none', letterSpacing: '0.04em' }}
+            >
+              Admin
+            </Link>
+          )}
           {user && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <div

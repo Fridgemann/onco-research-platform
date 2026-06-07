@@ -25,6 +25,7 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 class UserSummary(BaseModel):
     id: str
+    email: str
     role: UserRole
     is_active: bool
     is_verified: bool
@@ -35,6 +36,10 @@ class UserSummary(BaseModel):
 
 
 class DeactivateResponse(BaseModel):
+    message: str
+
+
+class ReactivateResponse(BaseModel):
     message: str
 
 
@@ -56,6 +61,7 @@ async def list_users(
     return [
         UserSummary(
             id=u.id,
+            email=decrypt_field(u.email_encrypted),
             role=u.role,
             is_active=u.is_active,
             is_verified=u.is_verified,
@@ -97,6 +103,37 @@ async def deactivate_user(
     )
 
     return DeactivateResponse(message="User deactivated successfully.")
+
+
+@router.patch("/users/{user_id}/reactivate", response_model=ReactivateResponse)
+async def reactivate_user(
+    user_id: str,
+    request: Request,
+    current_user: AdminUser,
+    db: AsyncSession = Depends(get_db),
+):
+    if user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot reactivate your own account.")
+
+    user = await db.scalar(select(User).where(User.id == user_id))
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if user.is_active:
+        raise HTTPException(status_code=409, detail="User is already active.")
+
+    user.is_active = True
+    user.updated_at = datetime.now(timezone.utc)
+
+    await write_audit_log(
+        db,
+        action=AuditAction.USER_REACTIVATED,
+        user_id=current_user.id,
+        resource_type="user",
+        resource_id=user_id,
+        request=request,
+    )
+
+    return ReactivateResponse(message="User reactivated successfully.")
 
 
 @router.patch("/users/{user_id}/role", response_model=RoleChangeResponse)
