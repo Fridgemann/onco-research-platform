@@ -14,8 +14,8 @@ class RegisterRequest(BaseModel):
     @field_validator("password")
     @classmethod
     def password_strength(cls, v: str) -> str:
-        if len(v) < 10:
-            raise ValueError("Password must be at least 10 characters.")
+        if len(v) < 12:
+            raise ValueError("Password must be at least 12 characters.")
         if not re.search(r"[A-Z]", v):
             raise ValueError("Password must contain at least one uppercase letter.")
         if not re.search(r"[0-9]", v):

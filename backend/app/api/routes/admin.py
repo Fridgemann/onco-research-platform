@@ -11,6 +11,7 @@ from pydantic import BaseModel, EmailStr
 from app.api.dependencies import AdminUser
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.rate_limit import limiter
 from app.core.security import encrypt_field, decrypt_field
 from app.models.audit_log import AuditAction
 from app.models.user import User, UserRole
@@ -75,6 +76,7 @@ async def list_users(
 
 
 @router.patch("/users/{user_id}/deactivate", response_model=DeactivateResponse)
+@limiter.limit("20/minute")
 async def deactivate_user(
     user_id: str,
     request: Request,
@@ -106,6 +108,7 @@ async def deactivate_user(
 
 
 @router.patch("/users/{user_id}/reactivate", response_model=ReactivateResponse)
+@limiter.limit("20/minute")
 async def reactivate_user(
     user_id: str,
     request: Request,
@@ -137,6 +140,7 @@ async def reactivate_user(
 
 
 @router.patch("/users/{user_id}/role", response_model=RoleChangeResponse)
+@limiter.limit("20/minute")
 async def change_user_role(
     user_id: str,
     body: RoleChangeRequest,
@@ -204,7 +208,8 @@ def _hash_token(token: str) -> str:
 
 # ── Researcher invite routes ─────────────────────────────────────────────────
 
-@router.post("/invites/researcher", response_model=ResearcherInviteResponse, status_code=201)
+@router.post("/invites/researcher", response_model=ResearcherInviteResponse, response_model_exclude_none=True, status_code=201)
+@limiter.limit("20/minute")
 async def create_researcher_invite(
     request: Request,
     body: ResearcherInviteRequest,
@@ -281,6 +286,7 @@ async def list_researcher_invites(
 
 
 @router.delete("/invites/researcher/{invite_id}", status_code=204)
+@limiter.limit("20/minute")
 async def revoke_researcher_invite(
     request: Request,
     invite_id: str,

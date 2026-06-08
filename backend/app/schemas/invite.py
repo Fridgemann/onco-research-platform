@@ -9,7 +9,7 @@ class InviteCreateRequest(BaseModel):
 
 class InviteCreateResponse(BaseModel):
     invite_id: str
-    token: str
+    token: str | None = None  # omitted in production — sent via email only
     expires_at: datetime
     message: str
 

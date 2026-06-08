@@ -7,3 +7,4 @@ backend/alembic/versions/__pycache__/
 *.pyo
 .DS_Store
 .claude/settings.local.json
+cookies.txt

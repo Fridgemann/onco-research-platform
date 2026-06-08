@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.database import get_db
+from app.core.config import settings
 from app.core.security import encrypt_field, decrypt_field
 from app.models.workspace import WorkspaceMember, MemberRole
 from app.models.workspace_invite import WorkspaceInvite, InviteStatus
@@ -39,7 +40,7 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-@workspace_invite_router.post("/{workspace_id}/invites", response_model=InviteCreateResponse, status_code=201)
+@workspace_invite_router.post("/{workspace_id}/invites", response_model=InviteCreateResponse, response_model_exclude_none=True, status_code=201)
 async def create_invite(
     request: Request,
     workspace_id: str,
@@ -104,9 +105,9 @@ async def create_invite(
 
     return InviteCreateResponse(
         invite_id=invite.id,
-        token=plain_token,
+        token=plain_token if settings.APP_ENV != "production" else None,
         expires_at=expires_at,
-        message="Invite created. Share the token with the collaborator.",
+        message="Invite created.",
     )
 
 

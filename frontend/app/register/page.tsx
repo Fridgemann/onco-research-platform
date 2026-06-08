@@ -56,7 +56,7 @@ function RegisterForm() {
   }
 
   const passwordRules = [
-    { label: '10+ characters', ok: form.password.length >= 10 },
+    { label: '12+ characters', ok: form.password.length >= 12 },
     { label: 'Uppercase letter', ok: /[A-Z]/.test(form.password) },
     { label: 'Number', ok: /[0-9]/.test(form.password) },
     { label: 'Special character', ok: /[!@#$%^&*(),.?":{}|<>]/.test(form.password) },

@@ -34,14 +34,17 @@ async def add_security_headers(request: Request, call_next) -> Response:
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if settings.APP_ENV == "production":
+        response.headers["Content-Security-Policy"] = "default-src 'none'"
+        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
     return response
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"] if settings.APP_ENV == "development" else [settings.FRONTEND_URL],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 app.include_router(admin.router, prefix="/api")
@@ -56,4 +59,4 @@ app.include_router(jobs_router, prefix="/api")
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "env": settings.APP_ENV}
+    return {"status": "ok"}

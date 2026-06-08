@@ -1,10 +1,13 @@
 import hashlib
 import io
+import logging
 import os
 import re
 import urllib.parse
 import uuid
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 import pandas as pd
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
@@ -278,6 +281,7 @@ async def get_dataset_columns(
         df = pd.read_csv(io.StringIO(data.decode("utf-8")), nrows=0, index_col=False)
         columns = [c for c in df.columns if not re.match(r"^Unnamed: \d+$", c)]
     except Exception:
+        logger.exception("Failed to parse CSV columns for dataset %s", dataset_id)
         raise HTTPException(status_code=422, detail="Could not parse dataset as CSV.")
 
     return {"columns": columns}

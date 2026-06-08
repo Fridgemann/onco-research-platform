@@ -204,6 +204,22 @@ class TestCreateInvite:
         assert "invite_id" in body
         assert "expires_at" in body
 
+    async def test_production_invite_omits_token(self, monkeypatch):
+        """In production APP_ENV the token must not appear in the response body."""
+        monkeypatch.setattr("app.api.routes.invite.settings.APP_ENV", "production")
+        db = make_db_multi(
+            _execute_result(scalar=make_workspace()),
+            _execute_result(scalar=None),
+            _execute_result(scalar=None),
+        )
+        async with client_as(make_user(USER_ID), db) as ac:
+            resp = await ac.post(INVITE_URL, json={"email": VALID_EMAIL})
+        assert resp.status_code == 201
+        body = resp.json()
+        assert "token" not in body
+        assert "invite_id" in body
+        assert "expires_at" in body
+
     async def test_workspace_not_found(self):
         db = make_db_multi(_execute_result(scalar=None))
         async with client_as(make_user(USER_ID), db) as ac:
