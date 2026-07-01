@@ -8,3 +8,11 @@ backend/alembic/versions/__pycache__/
 .DS_Store
 .claude/settings.local.json
 cookies.txt
+.agents/
+*.docx
+scripts/
+
+# Thesis and presentation artifacts
+docs/thesis/
+docs/presentation/
+output/pdf/

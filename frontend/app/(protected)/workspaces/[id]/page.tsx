@@ -84,6 +84,10 @@ export default function WorkspacePage({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  // Dataset delete
+  const [deletingDataset, setDeletingDataset] = useState<string | null>(null)
+  const [confirmDeleteDs, setConfirmDeleteDs] = useState<string | null>(null)
+
   // Upload modal
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [showUpload, setShowUpload] = useState(false)
@@ -284,6 +288,19 @@ export default function WorkspacePage({
     }
   }
 
+  async function handleDeleteDataset(datasetId: string) {
+    setDeletingDataset(datasetId)
+    try {
+      await apiFetch(`/api/workspaces/${id}/datasets/${datasetId}`, { method: 'DELETE' })
+      setDatasets((prev) => prev.filter((d) => d.id !== datasetId))
+      setConfirmDeleteDs(null)
+    } catch {
+      // ignore
+    } finally {
+      setDeletingDataset(null)
+    }
+  }
+
   async function handleRevoke(inviteId: string) {
     setRevoking(inviteId)
     try {
@@ -417,6 +434,30 @@ export default function WorkspacePage({
                       </p>
                     )}
                   </div>
+                  {workspace && currentUser.id === workspace.owner_id && (
+                    confirmDeleteDs === ds.id ? (
+                      <span style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                        <span style={{ fontSize: '11px', color: 'var(--text-secondary)', marginRight: '4px' }}>Sure?</span>
+                        <button
+                          className="btn btn-outline btn-sm"
+                          disabled={deletingDataset === ds.id}
+                          onClick={() => handleDeleteDataset(ds.id)}
+                          style={{ color: 'var(--status-failed-fg)' }}
+                        >
+                          {deletingDataset === ds.id ? 'Deleting…' : 'Yes'}
+                        </button>
+                        <button className="btn btn-outline btn-sm" onClick={() => setConfirmDeleteDs(null)}>No</button>
+                      </span>
+                    ) : (
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => setConfirmDeleteDs(ds.id)}
+                        style={{ color: 'var(--status-failed-fg)' }}
+                      >
+                        Delete
+                      </button>
+                    )
+                  )}
                 </div>
               ))
             )}
