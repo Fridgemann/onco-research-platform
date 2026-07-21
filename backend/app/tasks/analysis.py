@@ -1,6 +1,7 @@
 import io
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 import numpy as np
@@ -41,11 +42,22 @@ def _set_job(session, job_id: str, **kwargs) -> None:
         logger.error("_set_job: 0 rows updated for job_id=%s kwargs=%s", job_id, list(kwargs))
 
 
+class AnalysisValidationError(ValueError):
+    """A safe, developer-authored validation message meant to reach the user.
+
+    Never raise this with dataset-derived values embedded (e.g. cell contents) —
+    only column names, counts, and limits. A plain ValueError (including one
+    raised by pandas/sklearn/lifelines, which may embed raw dataset content)
+    is treated as unsafe and goes through the sanitized catch-all path in
+    run_analysis_task instead of being logged/stored verbatim.
+    """
+
+
 def _check_columns(df: pd.DataFrame, *col_lists: list[str]) -> None:
     all_cols = [c for cols in col_lists for c in cols]
     missing = [c for c in all_cols if c not in df.columns]
     if missing:
-        raise ValueError(
+        raise AnalysisValidationError(
             f"Column(s) not found: {missing}. "
             "Check the available columns listed in the analysis form."
         )
@@ -57,23 +69,129 @@ def _dropna_stats(df: pd.DataFrame, df_clean: pd.DataFrame) -> dict:
     return {"total_rows": total, "used_rows": used, "dropped_rows": total - used}
 
 
+_TOP_CODES_LIMIT = 5
+_CODE_STRING_MAX_LEN = 32
+_NORMALIZED_EXAMPLES_LIMIT = 3
+
+# English-style grouped thousands only: 1-3 leading digits, then one or more
+# ",ddd" groups of exactly 3 digits, optional decimal tail. Deliberately
+# strict — "1,23" (wrong group size) and "1.234,56" (European decimal comma)
+# do not match and are left as non-numeric/coded rather than guessed at.
+#
+# This assumes English number formatting (comma thousands separator, dot
+# decimal point). It will misread European-formatted numbers (e.g. "1.234,56"
+# meaning 1234.56) as non-numeric codes rather than parsing them — that's a
+# locale question, not something this helper decides. Locale selection can be
+# added later if a dataset needs it.
+_ENGLISH_GROUPED_NUMBER_RE = re.compile(r"^[+-]?\d{1,3}(,\d{3})+(\.\d+)?$")
+
+
+def _coerce_numeric(series: pd.Series) -> dict:
+    """Coerce a column to numeric without assuming non-numeric values are junk.
+
+    Values that fail conversion (e.g. 'ND', 'BLQ', '<5', assay flags) are kept
+    separate from true missing values so callers can report both distinctly
+    instead of silently dropping or misinterpreting them.
+
+    Only one narrow, unambiguous formatting convention is auto-corrected:
+    English-style thousands-grouped numbers (e.g. "1,234.56"). Everything
+    else that fails plain numeric parsing — units, comparison operators,
+    ambiguous locale formats, coded values — is reported, never guessed.
+    """
+    is_missing = series.isna()
+    numeric = pd.to_numeric(series, errors="coerce")
+
+    normalized_count = 0
+    normalized_examples: list[dict] = []
+
+    needs_retry = numeric.isna() & ~is_missing
+    if needs_retry.any():
+        candidates = series[needs_retry].astype(str).str.strip()
+        looks_grouped = candidates.str.match(_ENGLISH_GROUPED_NUMBER_RE)
+        if looks_grouped.any():
+            grouped_candidates = candidates[looks_grouped]
+            stripped = grouped_candidates.str.replace(",", "", regex=False)
+            parsed = pd.to_numeric(stripped, errors="coerce")
+            valid_parsed = parsed[~parsed.isna()]
+            numeric.loc[valid_parsed.index] = valid_parsed.values
+
+            normalized_count = int(len(valid_parsed))
+
+            # Up to N examples, deduped by the *complete* raw value so a
+            # frequently repeated value (e.g. "1,148" appearing 12 times)
+            # doesn't fill the whole example list with copies of itself, and
+            # two distinct long numbers sharing a prefix aren't conflated.
+            # Display truncation happens separately, after dedup.
+            raw_for_valid = grouped_candidates.loc[valid_parsed.index]
+            seen: dict[str, float] = {}
+            for raw_val, parsed_val in zip(raw_for_valid, valid_parsed):
+                if raw_val not in seen:
+                    seen[raw_val] = float(parsed_val)
+                    if len(seen) >= _NORMALIZED_EXAMPLES_LIMIT:
+                        break
+            normalized_examples = [
+                {
+                    "raw": raw if len(raw) <= _CODE_STRING_MAX_LEN else raw[:_CODE_STRING_MAX_LEN - 3] + "...",
+                    "parsed": parsed_val,
+                }
+                for raw, parsed_val in seen.items()
+            ]
+
+    is_valid = ~numeric.isna()
+    is_bad_code = ~is_valid & ~is_missing
+
+    codes = (
+        series[is_bad_code]
+        .astype(str)
+        .str.slice(0, _CODE_STRING_MAX_LEN)
+        .value_counts()
+        .head(_TOP_CODES_LIMIT)
+    )
+
+    return {
+        "values": numeric[is_valid],
+        "is_valid": is_valid,
+        "missing_rows": int(is_missing.sum()),
+        "non_numeric_rows": int(is_bad_code.sum()),
+        "top_non_numeric_codes": {str(k): int(v) for k, v in codes.items()},
+        "normalized_rows": normalized_count,
+        "normalized_rule": "english_thousands_grouping" if normalized_count else None,
+        "normalized_examples": normalized_examples,
+    }
+
+
 def _run_descriptive_stats(df: pd.DataFrame, params: dict) -> dict:
     columns = params.get("columns") or df.select_dtypes(include=[np.number]).columns.tolist()
     _check_columns(df, columns)
-    result = {"_meta": _dropna_stats(df, df[columns].dropna())}
+
+    result: dict = {}
+    joint_valid = pd.Series(True, index=df.index)
+
     for col in columns:
-        series = df[col].dropna()
+        coerced = _coerce_numeric(df[col])
+        values = coerced["values"]
+        if values.empty:
+            raise AnalysisValidationError(f"Column '{col}' has no usable numeric values.")
+
         result[col] = {
-            "count": int(series.count()),
-            "mean": float(series.mean()),
-            "std": float(series.std()),
-            "min": float(series.min()),
-            "p25": float(series.quantile(0.25)),
-            "median": float(series.median()),
-            "p75": float(series.quantile(0.75)),
-            "max": float(series.max()),
-            "missing": int(df[col].isna().sum()),
+            "count": int(values.count()),
+            "mean": float(values.mean()),
+            "std": float(values.std()),
+            "min": float(values.min()),
+            "p25": float(values.quantile(0.25)),
+            "median": float(values.median()),
+            "p75": float(values.quantile(0.75)),
+            "max": float(values.max()),
+            "missing": coerced["missing_rows"],
+            "non_numeric": coerced["non_numeric_rows"],
+            "top_non_numeric_codes": coerced["top_non_numeric_codes"],
+            "normalized": coerced["normalized_rows"],
+            "normalized_rule": coerced["normalized_rule"],
+            "normalized_examples": coerced["normalized_examples"],
         }
+        joint_valid &= coerced["is_valid"]
+
+    result["_meta"] = _dropna_stats(df, df[joint_valid])
     return result
 
 
@@ -86,7 +204,7 @@ def _run_regression(df: pd.DataFrame, params: dict) -> dict:
     target_col = params["target_column"]
     feature_cols = params["feature_columns"]
     if len(feature_cols) > _MAX_FEATURE_COLS:
-        raise ValueError(f"Too many feature columns ({len(feature_cols)}); maximum is {_MAX_FEATURE_COLS}.")
+        raise AnalysisValidationError(f"Too many feature columns ({len(feature_cols)}); maximum is {_MAX_FEATURE_COLS}.")
 
     _check_columns(df, [target_col], feature_cols)
     df_clean = df[[target_col] + feature_cols].dropna()
@@ -143,7 +261,7 @@ def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
 
     unique_times = df_clean[time_col].nunique()
     if unique_times > _KM_MAX_UNIQUE_TIMES:
-        raise ValueError(
+        raise AnalysisValidationError(
             f"Time column has {unique_times} unique values (max {_KM_MAX_UNIQUE_TIMES}). "
             "Round timestamps to whole days or months to reduce resolution."
         )
@@ -167,7 +285,7 @@ def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
 
     unique_groups = df_clean[group_col].unique()
     if len(unique_groups) > effective_max:
-        raise ValueError(
+        raise AnalysisValidationError(
             f"Group column has {len(unique_groups)} unique values, "
             f"exceeds your limit of {requested_max} "
             f"(server maximum: {_KM_ABSOLUTE_MAX_GROUPS}). "
@@ -197,7 +315,7 @@ def _run_logistic_regression(df: pd.DataFrame, params: dict) -> dict:
     target_col = params["target_column"]
     feature_cols = params["feature_columns"]
     if len(feature_cols) > _MAX_FEATURE_COLS:
-        raise ValueError(f"Too many feature columns ({len(feature_cols)}); maximum is {_MAX_FEATURE_COLS}.")
+        raise AnalysisValidationError(f"Too many feature columns ({len(feature_cols)}); maximum is {_MAX_FEATURE_COLS}.")
 
     _check_columns(df, [target_col], feature_cols)
     df_clean = df[[target_col] + feature_cols].dropna()
@@ -271,16 +389,31 @@ def run_analysis_task(self, job_id: str):
                      completed_at=datetime.now(timezone.utc))
             logger.info("Job %s completed successfully", job_id)
 
-        except ValueError as exc:
+        except AnalysisValidationError as exc:
+            # Developer-authored message (column names/counts/limits only,
+            # never dataset cell values) — safe to log and store verbatim.
             logger.warning("Job %s validation error: %s", job_id, exc)
             _set_job(session, job_id,
                      status=JobStatus.FAILED,
                      error_message=str(exc)[:512],
                      completed_at=datetime.now(timezone.utc))
         except Exception as exc:
-            logger.exception("Job %s failed: %s", job_id, exc)
+            # Any other exception — including plain ValueError, which pandas/
+            # sklearn/lifelines can raise with dataset-derived values embedded
+            # in the message (e.g. an object-column .mean() call concatenating
+            # a whole string column into the error text). Never log str(exc)
+            # or use exc_info here, and never let the original exception
+            # object propagate: logger.exception's traceback rendering, and
+            # Celery's own task-failure logging, would both print it in full
+            # regardless of how our own log message is formatted.
+            logger.error(
+                "Job %s failed: job_type=%s exception_class=%s",
+                job_id, job_type, type(exc).__name__,
+            )
             _set_job(session, job_id,
                      status=JobStatus.FAILED,
                      error_message="Analysis failed. Check that column names exist and contain numeric data.",
                      completed_at=datetime.now(timezone.utc))
-            raise
+            raise RuntimeError(
+                "Analysis job failed; dataset-derived exception text suppressed"
+            ) from None

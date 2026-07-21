@@ -8,6 +8,7 @@ import RegressionResult from './RegressionResult'
 import LogisticRegressionResult from './LogisticRegressionResult'
 
 type Meta = { total_rows: number; used_rows: number; dropped_rows: number }
+type DescriptiveColumnStats = { missing?: number; non_numeric?: number }
 
 function DroppedRowsWarning({ meta }: { meta: Meta | null }) {
   if (!meta || meta.dropped_rows === 0) return null
@@ -15,6 +16,31 @@ function DroppedRowsWarning({ meta }: { meta: Meta | null }) {
     <p style={{ fontSize: '11px', color: '#c8a44a', marginBottom: '14px' }}>
       ⚠ {meta.dropped_rows} rows excluded due to missing values in selected columns
       ({meta.used_rows} of {meta.total_rows} used).
+    </p>
+  )
+}
+
+function DescriptiveStatsDroppedRowsWarning({
+  meta,
+  columns,
+}: {
+  meta: Meta | null
+  columns: Record<string, DescriptiveColumnStats>
+}) {
+  if (!meta || meta.dropped_rows === 0) return null
+
+  const colNames = Object.keys(columns)
+  // Exact missing/non-numeric split is only well-defined for a single
+  // selected column — with multiple columns a row can be excluded by more
+  // than one column at once, so a per-column sum would double-count.
+  const single = colNames.length === 1 ? columns[colNames[0]] : null
+
+  return (
+    <p style={{ fontSize: '11px', color: '#c8a44a', marginBottom: '14px' }}>
+      ⚠ {meta.used_rows} of {meta.total_rows} rows used. {meta.dropped_rows} excluded
+      {single
+        ? `: ${single.missing ?? 0} missing, ${single.non_numeric ?? 0} non-numeric/coded.`
+        : ' due to missing or non-numeric/coded values (see per-column breakdown below).'}
     </p>
   )
 }
@@ -34,7 +60,9 @@ function ResultPanelInner({ job }: { job: AnalysisJob }) {
 
   return (
     <>
-      <DroppedRowsWarning meta={meta} />
+      {job.job_type === 'descriptive_stats'
+        ? <DescriptiveStatsDroppedRowsWarning meta={meta} columns={clean as Record<string, DescriptiveColumnStats>} />
+        : <DroppedRowsWarning meta={meta} />}
       {(() => {
         switch (job.job_type) {
           case 'kaplan_meier':
