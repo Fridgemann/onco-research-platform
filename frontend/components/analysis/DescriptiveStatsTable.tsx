@@ -1,5 +1,7 @@
 'use client'
 
+type BinaryCode = { count: number; percent: number }
+
 type ColumnStats = {
   count: number
   mean: number
@@ -15,6 +17,8 @@ type ColumnStats = {
   normalized?: number
   normalized_rule?: string | null
   normalized_examples?: { raw: string; parsed: number }[]
+  is_binary?: boolean
+  binary_counts?: { coded_0: BinaryCode; coded_1: BinaryCode } | null
 }
 
 const NORMALIZED_RULE_LABELS: Record<string, string> = {
@@ -33,9 +37,61 @@ function fmt(v: number, key: string): string {
   return v.toFixed(3)
 }
 
+function BinaryColumnCard({ col, stats }: { col: string; stats: ColumnStats }) {
+  const bc = stats.binary_counts
+  if (!bc) return null
+  return (
+    <div style={{
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--radius)',
+      padding: '12px 14px',
+      background: 'var(--bg-surface)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: '10px', marginBottom: '10px' }}>
+        <p style={{ fontSize: '12px', color: '#c88828' }}>{col}</p>
+        <p style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>
+          {stats.count} used
+          {stats.missing > 0 && <> · <span style={{ color: '#e06c75' }}>{stats.missing} missing</span></>}
+          {!!stats.non_numeric && stats.non_numeric > 0 && <> · <span style={{ color: '#e06c75' }}>{stats.non_numeric} non-numeric</span></>}
+        </p>
+      </div>
+      <div style={{ display: 'flex', gap: '28px' }}>
+        <div>
+          <p style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-secondary)', marginBottom: '3px' }}>
+            Coded 0
+          </p>
+          <p style={{ fontSize: '17px', fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>
+            {bc.coded_0.count}
+            <span style={{ fontSize: '11px', color: 'var(--text-secondary)', marginLeft: '6px' }}>
+              ({bc.coded_0.percent.toFixed(1)}%)
+            </span>
+          </p>
+        </div>
+        <div>
+          <p style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-secondary)', marginBottom: '3px' }}>
+            Coded 1
+          </p>
+          <p style={{ fontSize: '17px', fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>
+            {bc.coded_1.count}
+            <span style={{ fontSize: '11px', color: 'var(--text-secondary)', marginLeft: '6px' }}>
+              ({bc.coded_1.percent.toFixed(1)}%)
+            </span>
+          </p>
+        </div>
+      </div>
+      <p style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '10px', opacity: 0.75 }}>
+        Binary-coded column — what 0 and 1 represent (e.g. yes/no, male/female) is not inferred from the column name. Check your dataset documentation.
+      </p>
+    </div>
+  )
+}
+
 export default function DescriptiveStatsTable({ data }: { data: Record<string, ColumnStats> }) {
   const columns = Object.keys(data)
   if (columns.length === 0) return null
+
+  const binaryColumns = columns.filter((col) => data[col].is_binary)
+  const otherColumns = columns.filter((col) => !data[col].is_binary)
 
   const codeEntries = columns
     .map((col) => [col, data[col].top_non_numeric_codes] as const)
@@ -47,31 +103,41 @@ export default function DescriptiveStatsTable({ data }: { data: Record<string, C
 
   return (
     <div>
-      <div style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
-          <thead>
-            <tr>
-              <th style={thStyle({ left: true })}>Column</th>
-              {COLS.map(c => <th key={c} style={thStyle({})}>{COL_LABELS[c]}</th>)}
-            </tr>
-          </thead>
-          <tbody>
-            {columns.map((col, i) => (
-              <tr key={col} style={{ background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)' }}>
-                <td style={tdStyle({ accent: true })}>{col}</td>
-                {COLS.map(c => {
-                  const v = data[col][c]
-                  return (
-                    <td key={c} style={tdStyle({ warn: (c === 'missing' || c === 'non_numeric') && !!v && v > 0 })}>
-                      {v === undefined ? '—' : fmt(v, c)}
-                    </td>
-                  )
-                })}
+      {binaryColumns.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: otherColumns.length > 0 ? '20px' : 0 }}>
+          {binaryColumns.map((col) => (
+            <BinaryColumnCard key={col} col={col} stats={data[col]} />
+          ))}
+        </div>
+      )}
+
+      {otherColumns.length > 0 && (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+            <thead>
+              <tr>
+                <th style={thStyle({ left: true })}>Column</th>
+                {COLS.map(c => <th key={c} style={thStyle({})}>{COL_LABELS[c]}</th>)}
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {otherColumns.map((col, i) => (
+                <tr key={col} style={{ background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)' }}>
+                  <td style={tdStyle({ accent: true })}>{col}</td>
+                  {COLS.map(c => {
+                    const v = data[col][c]
+                    return (
+                      <td key={c} style={tdStyle({ warn: (c === 'missing' || c === 'non_numeric') && !!v && v > 0 })}>
+                        {v === undefined ? '—' : fmt(v, c)}
+                      </td>
+                    )
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {normalizedEntries.length > 0 && (
         <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '6px' }}>

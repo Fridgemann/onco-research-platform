@@ -160,6 +160,34 @@ def _coerce_numeric(series: pd.Series) -> dict:
     }
 
 
+_BINARY_CODES = {0.0, 1.0}
+
+
+def _binary_code_counts(values: pd.Series) -> dict | None:
+    """If the usable values are exactly {0, 1} — both present, nothing else —
+    return count/percent for each code.
+
+    Exact equality, not subset: a column with only 0s (or only 1s) is a
+    constant column, not a demonstrated binary code, and is left as a plain
+    numeric column rather than presented as if it were binary-coded.
+
+    Never guesses what 0/1 *mean* (yes/no, male/female, etc.) — that's for
+    the researcher's own dataset documentation, not something this platform
+    infers from a column name or value pattern.
+    """
+    unique_vals = set(values.unique())
+    if unique_vals != _BINARY_CODES:
+        return None
+
+    total = int(values.count())
+    count_0 = int((values == 0.0).sum())
+    count_1 = int((values == 1.0).sum())
+    return {
+        "coded_0": {"count": count_0, "percent": (count_0 / total * 100) if total else 0.0},
+        "coded_1": {"count": count_1, "percent": (count_1 / total * 100) if total else 0.0},
+    }
+
+
 def _run_descriptive_stats(df: pd.DataFrame, params: dict) -> dict:
     columns = params.get("columns") or df.select_dtypes(include=[np.number]).columns.tolist()
     _check_columns(df, columns)
@@ -172,6 +200,8 @@ def _run_descriptive_stats(df: pd.DataFrame, params: dict) -> dict:
         values = coerced["values"]
         if values.empty:
             raise AnalysisValidationError(f"Column '{col}' has no usable numeric values.")
+
+        binary_counts = _binary_code_counts(values)
 
         result[col] = {
             "count": int(values.count()),
@@ -188,6 +218,8 @@ def _run_descriptive_stats(df: pd.DataFrame, params: dict) -> dict:
             "normalized": coerced["normalized_rows"],
             "normalized_rule": coerced["normalized_rule"],
             "normalized_examples": coerced["normalized_examples"],
+            "is_binary": binary_counts is not None,
+            "binary_counts": binary_counts,
         }
         joint_valid &= coerced["is_valid"]
 
