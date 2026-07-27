@@ -1,13 +1,14 @@
 """
 Milestone 1 — externally sourced golden fixture: logistic regression.
 
-Source (primary citation):
+Secondary reference:
     Wikipedia, "Logistic regression" article, "Example" section (hours
-    studied vs. exam pass/fail), accessed 2026-07. The article's worked
-    example fits an unregularized maximum-likelihood logistic regression
-    to 20 students' study hours and pass/fail outcomes, reporting
-    intercept (beta_0) approximately -4.1 and slope (beta_1) approximately
-    1.5 (values stated in the article to 1 decimal place).
+    studied vs. exam pass/fail). https://en.wikipedia.org/wiki/Logistic_regression
+    Accessed 2026-07-20. The article's worked example fits an unregularized
+    maximum-likelihood logistic regression to 20 students' study hours and
+    pass/fail outcomes, reporting intercept (beta_0) approximately -4.1 and
+    slope (beta_1) approximately 1.5 (values stated in the article to 1
+    decimal place).
 
 IMPORTANT METHODOLOGY NOTE: the production code (_run_logistic_regression)
 fits sklearn.LogisticRegression with its DEFAULT L2 regularization
@@ -16,19 +17,28 @@ an unregularized fit reproduces the cited Wikipedia values closely
 (-4.078 vs -4.1, 1.505 vs 1.5), but sklearn's regularized default gives
 substantially different coefficients (-3.14, 1.15) — a real ~23%
 difference, not a rounding discrepancy. So this file makes two separate,
-clearly-labeled comparisons instead of one:
+clearly-labeled comparisons instead of one, and they validate different
+things against different references:
 
   1. An "unregularized MLE" constant, computed offline with the same
      hand-written L2-penalized Newton-Raphson solver used in
      test_validation_logistic_regression.py (with the penalty strength
      set negligibly small, C=1e8, so it approximates no penalty at all).
-     This is compared against the cited published values, to confirm the
-     transcribed data and methodology genuinely reproduce the citation.
+     This is compared against the published -4.1 / 1.5 citation, and is
+     what validates that this fixture's transcribed data and methodology
+     genuinely reproduce an externally published result.
 
   2. A "production" constant, computed offline with that same solver but
      using C=1.0 (sklearn's actual default), compared against
-     _run_logistic_regression's real output. This is the actual
-     validation of the production code path, on externally-sourced data.
+     _run_logistic_regression's real output. This validates the actual
+     production code path — but NOT against externally published
+     production-equivalent coefficients, because no such citation exists
+     (the cited source is unregularized; production is regularized).
+     Its reference is the independent hand-written penalized solver only,
+     same as the internal (non-golden) fixture already covers — the
+     external citation here lends confidence to the data and the
+     unregularized half of the methodology, not to the regularized
+     coefficients themselves.
 
 Data transcribed from the article's table (hours studied, pass=1/fail=0):
 """
