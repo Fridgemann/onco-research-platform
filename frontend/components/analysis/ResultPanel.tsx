@@ -6,6 +6,7 @@ import KMCurveChart from './KMCurveChart'
 import DescriptiveStatsTable from './DescriptiveStatsTable'
 import RegressionResult from './RegressionResult'
 import LogisticRegressionResult from './LogisticRegressionResult'
+import ProcessingReport, { type ColumnProcessing } from './ProcessingReport'
 
 type Meta = { total_rows: number; used_rows: number; dropped_rows: number }
 type DescriptiveColumnStats = { missing?: number; non_numeric?: number }
@@ -45,8 +46,11 @@ function DescriptiveStatsDroppedRowsWarning({
   )
 }
 
-function stripMeta(result: Record<string, unknown>): Record<string, unknown> {
-  const { _meta: _, ...rest } = result
+function stripInternalKeys(result: Record<string, unknown>): Record<string, unknown> {
+  // Remove keys the analysis components should not treat as data. _meta and
+  // processing are cross-cutting reporting fields; leaving `processing` in
+  // would, for example, make KMCurveChart render it as a survival group.
+  const { _meta: _m, processing: _p, ...rest } = result
   return rest
 }
 
@@ -55,14 +59,21 @@ function ResultPanelInner({ job }: { job: AnalysisJob }) {
 
   const result = job.result as Record<string, unknown>
   const meta = (result._meta as Meta) ?? null
-  const clean = stripMeta(result)
+  const processing = (result.processing as Record<string, ColumnProcessing>) ?? null
+  const clean = stripInternalKeys(result)
   const cleanJob = { ...job, result: clean }
+
+  // descriptive_stats has its own richer per-column reporting inside its
+  // table; the other three analyses share the Milestone 2 ProcessingReport.
+  const preludeReport = job.job_type === 'descriptive_stats'
+    ? <DescriptiveStatsDroppedRowsWarning meta={meta} columns={clean as Record<string, DescriptiveColumnStats>} />
+    : processing
+      ? <ProcessingReport meta={meta} processing={processing} />
+      : <DroppedRowsWarning meta={meta} />
 
   return (
     <>
-      {job.job_type === 'descriptive_stats'
-        ? <DescriptiveStatsDroppedRowsWarning meta={meta} columns={clean as Record<string, DescriptiveColumnStats>} />
-        : <DroppedRowsWarning meta={meta} />}
+      {preludeReport}
       {(() => {
         switch (job.job_type) {
           case 'kaplan_meier':
