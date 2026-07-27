@@ -341,39 +341,81 @@ def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
     time_col = params["time_column"]
     event_col = params["event_column"]
     group_col = params.get("group_column")
+    event_value = params.get("event_value")  # e.g. 2 for R convention, or a label like "relapse"
 
     selected = [time_col, event_col] + ([group_col] if group_col else [])
     _check_columns(df, selected)
 
-    event_value = params.get("event_value")  # e.g. 2 for R convention (1=censored, 2=dead)
-    df_clean = df[selected].dropna()
-    meta = _dropna_stats(df, df_clean)
+    processing: dict[str, dict] = {}
+    joint_valid = pd.Series(True, index=df.index)
 
-    unique_times = df_clean[time_col].nunique()
+    # Duration is the only numeric role — coerce + normalize it.
+    dur = _coerce_numeric(df[time_col])
+    processing[time_col] = _numeric_processing_report("duration", dur)
+    joint_valid &= dur["is_valid"]
+
+    # Event is a categorical role: its raw values are preserved, never
+    # numerically coerced. Encoding rules:
+    #   - no event_value: accept only boolean or exact 0/1; anything else is
+    #     ambiguous (e.g. is "2" an event or a second censoring code?) and is
+    #     rejected rather than guessed.
+    #   - explicit event_value: any encoding is allowed, compared for exact
+    #     equality against the preserved raw value (supports labels like
+    #     "relapse" without inference).
+    event_valid, processing[event_col] = _categorical_processing_report(df[event_col], "event")
+    if event_value is None:
+        non_missing_events = set(df[event_col].dropna().unique())
+        # {0, 1} covers ints, floats (0.0/1.0), and bools (True==1, False==0)
+        # by value equality; string "0"/"1" is deliberately NOT accepted here.
+        if not non_missing_events.issubset({0, 1}):
+            raise AnalysisValidationError(
+                "Event column must be boolean or coded 0/1 when no event value "
+                "is specified. Provide an explicit event value to use other "
+                "encodings."
+            )
+    joint_valid &= event_valid
+
+    # Group is a categorical role — never coerced, even when the labels look
+    # numeric (e.g. treatment arm coded 0/1/2). Raw labels are preserved.
+    if group_col:
+        group_valid, processing[group_col] = _categorical_processing_report(df[group_col], "group")
+        joint_valid &= group_valid
+
+    meta = _dropna_stats(df, df[joint_valid])
+    if not bool(joint_valid.any()):
+        raise AnalysisValidationError(
+            "No rows have usable values across the selected columns."
+        )
+
+    durations = dur["coerced"][joint_valid]
+    event_raw = df[event_col][joint_valid]
+    event_observed = (event_raw == event_value) if event_value is not None else event_raw
+
+    unique_times = durations.nunique()
     if unique_times > _KM_MAX_UNIQUE_TIMES:
         raise AnalysisValidationError(
             f"Time column has {unique_times} unique values (max {_KM_MAX_UNIQUE_TIMES}). "
             "Round timestamps to whole days or months to reduce resolution."
         )
 
-    event_observed = (df_clean[event_col] == event_value) if event_value is not None else df_clean[event_col]
-
     if not group_col:
         kmf = KaplanMeierFitter()
-        kmf.fit(durations=df_clean[time_col], event_observed=event_observed)
+        kmf.fit(durations=durations, event_observed=event_observed)
         return {
             "overall": {
                 "timeline": kmf.survival_function_.index.tolist(),
                 "survival_probability": kmf.survival_function_["KM_estimate"].tolist(),
                 "median_survival": float(kmf.median_survival_time_)
             },
+            "processing": processing,
             "_meta": meta,
         }
 
+    groups = df[group_col][joint_valid]
     requested_max = int(params.get("max_groups", _KM_ABSOLUTE_MAX_GROUPS))
     effective_max = min(requested_max, _KM_ABSOLUTE_MAX_GROUPS)
 
-    unique_groups = df_clean[group_col].unique()
+    unique_groups = groups.unique()
     if len(unique_groups) > effective_max:
         raise AnalysisValidationError(
             f"Group column has {len(unique_groups)} unique values, "
@@ -382,12 +424,11 @@ def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
             "Use a categorical column with fewer distinct values."
         )
 
-    result: dict = {"_meta": meta}
+    result: dict = {"processing": processing, "_meta": meta}
     for group in unique_groups:
-        subset = df_clean[df_clean[group_col] == group]
-        sub_events = (subset[event_col] == event_value) if event_value is not None else subset[event_col]
+        group_mask = groups == group
         kmf = KaplanMeierFitter()
-        kmf.fit(durations=subset[time_col], event_observed=sub_events)
+        kmf.fit(durations=durations[group_mask], event_observed=event_observed[group_mask])
         result[str(group)] = {
             "timeline": kmf.survival_function_.index.tolist(),
             "survival_probability": kmf.survival_function_["KM_estimate"].tolist(),
