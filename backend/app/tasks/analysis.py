@@ -150,6 +150,11 @@ def _coerce_numeric(series: pd.Series) -> dict:
 
     return {
         "values": numeric[is_valid],
+        # Full-index coerced series (normalization applied, NaN where the
+        # value was missing or non-numeric). Callers slice this on a JOINT
+        # validity mask so multiple columns stay row-aligned — never on this
+        # column's own is_valid mask alone.
+        "coerced": numeric,
         "is_valid": is_valid,
         "missing_rows": int(is_missing.sum()),
         "non_numeric_rows": int(is_bad_code.sum()),
@@ -158,6 +163,38 @@ def _coerce_numeric(series: pd.Series) -> dict:
         "normalized_rule": "english_thousands_grouping" if normalized_count else None,
         "normalized_examples": normalized_examples,
     }
+
+
+def _numeric_processing_report(role: str, coerced: dict) -> dict:
+    """Per-column processing summary for a numeric-role column.
+
+    Shared shape across every analysis (Milestone 2): role, missing count,
+    and the non-numeric / normalization detail that only applies to numeric
+    roles. Categorical roles use _categorical_processing_report instead and
+    never carry non_numeric fields.
+    """
+    return {
+        "role": role,
+        "missing": coerced["missing_rows"],
+        "non_numeric": coerced["non_numeric_rows"],
+        "top_non_numeric_codes": coerced["top_non_numeric_codes"],
+        "normalized": coerced["normalized_rows"],
+        "normalized_rule": coerced["normalized_rule"],
+        "normalized_examples": coerced["normalized_examples"],
+    }
+
+
+def _categorical_processing_report(series: pd.Series, role: str) -> tuple[pd.Series, dict]:
+    """Validity mask + processing summary for a categorical-role column.
+
+    Original labels are preserved untouched — only genuinely missing values
+    (NaN) are invalid. Valid non-numeric text (class labels, group names) is
+    NEVER reported as "non-numeric"; that field is omitted entirely here.
+    Returns (full_index_is_valid_mask, report).
+    """
+    is_valid = series.notna()
+    report = {"role": role, "missing": int((~is_valid).sum())}
+    return is_valid, report
 
 
 _BINARY_CODES = {0.0, 1.0}
@@ -239,14 +276,30 @@ def _run_regression(df: pd.DataFrame, params: dict) -> dict:
         raise AnalysisValidationError(f"Too many feature columns ({len(feature_cols)}); maximum is {_MAX_FEATURE_COLS}.")
 
     _check_columns(df, [target_col], feature_cols)
-    df_clean = df[[target_col] + feature_cols].dropna()
-    meta = _dropna_stats(df, df_clean)
-    y = df_clean[target_col].values
+
+    # Linear regression: target AND every feature are numeric roles. Coerce
+    # each, then align on a single joint validity mask so every column keeps
+    # the same original rows — never filter columns independently.
+    coerced: dict[str, dict] = {}
+    processing: dict[str, dict] = {}
+    joint_valid = pd.Series(True, index=df.index)
+    for col, role in [(target_col, "target")] + [(f, "feature") for f in feature_cols]:
+        c = _coerce_numeric(df[col])
+        coerced[col] = c
+        processing[col] = _numeric_processing_report(role, c)
+        joint_valid &= c["is_valid"]
+
+    meta = _dropna_stats(df, df[joint_valid])
+    if not bool(joint_valid.any()):
+        raise AnalysisValidationError(
+            "No rows have usable numeric values across the target and all feature columns."
+        )
+
+    y = coerced[target_col]["coerced"][joint_valid].to_numpy()
 
     if len(feature_cols) == 1:
-        slope, intercept, r_value, p_value, std_err = linregress(
-            df_clean[feature_cols[0]].values, y
-        )
+        x = coerced[feature_cols[0]]["coerced"][joint_valid].to_numpy()
+        slope, intercept, r_value, p_value, std_err = linregress(x, y)
         return {
             "type": "linear",
             "feature": feature_cols[0],
@@ -256,10 +309,14 @@ def _run_regression(df: pd.DataFrame, params: dict) -> dict:
             "p_value": float(p_value),
             "std_err": float(std_err),
             "n": len(y),
+            "processing": processing,
             "_meta": meta,
         }
 
-    X = np.column_stack([np.ones(len(df_clean)), df_clean[feature_cols].values])
+    feature_matrix = np.column_stack(
+        [coerced[f]["coerced"][joint_valid].to_numpy() for f in feature_cols]
+    )
+    X = np.column_stack([np.ones(len(y)), feature_matrix])
     coeffs = np.linalg.lstsq(X, y, rcond=None)[0]
     y_pred = X @ coeffs
     ss_res = float(np.sum((y - y_pred) ** 2))
@@ -271,6 +328,7 @@ def _run_regression(df: pd.DataFrame, params: dict) -> dict:
         "coefficients": {f: float(c) for f, c in zip(feature_cols, coeffs[1:])},
         "r_squared": float(1 - ss_res / ss_tot),
         "n": len(y),
+        "processing": processing,
         "_meta": meta,
     }
 
