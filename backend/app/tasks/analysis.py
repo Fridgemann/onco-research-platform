@@ -408,11 +408,43 @@ def _run_logistic_regression(df: pd.DataFrame, params: dict) -> dict:
         raise AnalysisValidationError(f"Too many feature columns ({len(feature_cols)}); maximum is {_MAX_FEATURE_COLS}.")
 
     _check_columns(df, [target_col], feature_cols)
-    df_clean = df[[target_col] + feature_cols].dropna()
-    meta = _dropna_stats(df, df_clean)
 
-    y = df_clean[target_col].values
-    X = df_clean[feature_cols].values
+    # Features are numeric roles (coerce + normalize); the target is a
+    # categorical role — its original class labels are preserved exactly and
+    # never sent through numeric coercion. All columns align on one joint mask.
+    processing: dict[str, dict] = {}
+    joint_valid = pd.Series(True, index=df.index)
+
+    target_valid, processing[target_col] = _categorical_processing_report(df[target_col], "target")
+    joint_valid &= target_valid
+
+    coerced: dict[str, dict] = {}
+    for col in feature_cols:
+        c = _coerce_numeric(df[col])
+        coerced[col] = c
+        processing[col] = _numeric_processing_report("feature", c)
+        joint_valid &= c["is_valid"]
+
+    meta = _dropna_stats(df, df[joint_valid])
+    if not bool(joint_valid.any()):
+        raise AnalysisValidationError(
+            "No rows have usable values across the target and all feature columns."
+        )
+
+    y = df[target_col][joint_valid].to_numpy()
+    X = np.column_stack(
+        [coerced[f]["coerced"][joint_valid].to_numpy() for f in feature_cols]
+    )
+
+    # Binary classification only — require exactly two classes remaining after
+    # joint filtering. Fewer than two means the outcome has no contrast to
+    # model; more than two is unsupported (the result shape assumes binary).
+    n_classes = pd.Series(y).nunique()
+    if n_classes != 2:
+        raise AnalysisValidationError(
+            f"Logistic regression requires exactly two outcome classes after "
+            f"excluding unusable rows; found {n_classes}."
+        )
 
     model = LogisticRegression(max_iter=1000)
     model.fit(X, y)
@@ -437,6 +469,7 @@ def _run_logistic_regression(df: pd.DataFrame, params: dict) -> dict:
         "auc": auc,
         "n": len(y),
         "classes": model.classes_.tolist(),
+        "processing": processing,
         "_meta": meta,
     }
 
