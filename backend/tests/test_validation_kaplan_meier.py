@@ -36,6 +36,7 @@ import pandas as pd
 import pytest
 
 from app.tasks.analysis import _run_kaplan_meier
+from tests.conftest import km_overall, km_curve
 
 TOLERANCE = 1e-9
 
@@ -65,7 +66,7 @@ EXPECTED_OVERALL_MEDIAN = 5.0
 
 def test_overall_km_curve_matches_hand_derived_product_limit_formula():
     result = _run_kaplan_meier(DF_OVERALL, {"time_column": "duration", "event_column": "event"})
-    overall = result["overall"]
+    overall = km_overall(result)
 
     assert overall["timeline"] == pytest.approx(EXPECTED_OVERALL_TIMELINE, abs=TOLERANCE)
     assert overall["survival_probability"] == pytest.approx(EXPECTED_OVERALL_SURVIVAL, abs=TOLERANCE)
@@ -111,12 +112,12 @@ def test_grouped_km_curves_match_hand_derived_product_limit_formula():
         {"time_column": "duration", "event_column": "event", "group_column": "arm"},
     )
 
-    group_a = result["A"]
+    group_a = km_curve(result, "A")
     assert group_a["timeline"] == pytest.approx(EXPECTED_GROUP_A_TIMELINE, abs=TOLERANCE)
     assert group_a["survival_probability"] == pytest.approx(EXPECTED_GROUP_A_SURVIVAL, abs=TOLERANCE)
     assert group_a["median_survival"] == pytest.approx(EXPECTED_GROUP_A_MEDIAN, abs=TOLERANCE)
 
-    group_b = result["B"]
+    group_b = km_curve(result, "B")
     assert group_b["timeline"] == pytest.approx(EXPECTED_GROUP_B_TIMELINE, abs=TOLERANCE)
     assert group_b["survival_probability"] == pytest.approx(EXPECTED_GROUP_B_SURVIVAL, abs=TOLERANCE)
     assert group_b["median_survival"] == pytest.approx(EXPECTED_GROUP_B_MEDIAN, abs=TOLERANCE)

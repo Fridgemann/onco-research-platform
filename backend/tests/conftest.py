@@ -88,6 +88,26 @@ def make_db(first_result, second_result=None):
 
     return db
 
+# ── Kaplan-Meier result helpers (collision-safe groups list) ────────────────
+
+def km_curve(result, label):
+    """Return the curve dict for a group label from a KM result's groups list."""
+    for g in result["groups"]:
+        if str(g["label"]) == str(label):
+            return g["curve"]
+    raise KeyError(f"group label {label!r} not found in {[g['label'] for g in result['groups']]}")
+
+
+def km_overall(result):
+    """Return the single curve for a non-grouped KM result."""
+    return result["groups"][0]["curve"]
+
+
+def km_labels(result):
+    """Return the set of (label, value_type) pairs from a KM result."""
+    return {(g["label"], g["value_type"]) for g in result["groups"]}
+
+
 def make_member(role: MemberRole = MemberRole.OWNER, user_id: str = USER_ID):
     m = MagicMock()
     m.user_id = user_id

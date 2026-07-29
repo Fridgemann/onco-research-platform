@@ -148,27 +148,34 @@ async def km_preflight(
     try:
         result = await run_in_threadpool(_parse_and_preflight)
     except AnalysisValidationError as exc:
-        # Developer-authored, value-free message — safe to surface.
+        # A failed attempt still accessed and decrypted the dataset — audit it
+        # (status=failed, no raw values or error text in the detail).
+        await _audit_preflight(db, current_user.id, dataset_id, status="failed")
         raise HTTPException(status_code=422, detail=str(exc))
     except HTTPException:
         raise
     except Exception:
-        # Never leak dataset-derived content; log without cell values.
+        # Never leak dataset-derived content; log/audit without cell values.
         logger.error("KM preflight failed for dataset %s (sanitized)", dataset_id)
+        await _audit_preflight(db, current_user.id, dataset_id, status="failed")
         raise HTTPException(status_code=422, detail="Could not process dataset for preflight.")
 
-    # Audit the data-access action. Detail carries no status values.
+    await _audit_preflight(db, current_user.id, dataset_id, status="success")
+    response.headers["Cache-Control"] = "no-store"
+    return result
+
+
+async def _audit_preflight(db, user_id: str, dataset_id: str, status: str) -> None:
+    """Audit a KM preflight data-access. Detail carries no status cell values."""
     await write_audit_log(
         db,
         action=AuditAction.ANALYSIS_PREFLIGHTED,
-        user_id=current_user.id,
+        user_id=user_id,
         resource_type="dataset",
         resource_id=dataset_id,
+        status=status,
         detail=f"km_preflight dataset_id={dataset_id}",
     )
-
-    response.headers["Cache-Control"] = "no-store"
-    return result
 
 
 @jobs_router.get("/{job_id}", response_model=AnalysisJobResponse)

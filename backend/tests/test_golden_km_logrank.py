@@ -40,6 +40,7 @@ GOLDEN_DOF = 1
 
 def test_logrank_chi_square_matches_published_value():
     comp = RESULT["comparison"]
+    assert comp["available"] is True
     assert comp["test"] == "logrank"
     assert comp["chi_square"] == pytest.approx(GOLDEN_LOGRANK_CHI_SQUARE, abs=0.01)
 

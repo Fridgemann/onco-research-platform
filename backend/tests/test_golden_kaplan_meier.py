@@ -41,6 +41,7 @@ import pandas as pd
 import pytest
 
 from app.tasks.analysis import _run_kaplan_meier
+from tests.conftest import km_curve
 
 CONTROL_TIMES = [1, 1, 2, 2, 3, 4, 4, 5, 5, 8, 8, 8, 8, 11, 11, 12, 12, 15, 17, 22, 23]
 CONTROL_EVENTS = [1] * 21  # all relapse, no censoring
@@ -88,24 +89,24 @@ RESULT = _run_kaplan_meier(
 
 
 def test_control_median_matches_published_value():
-    assert RESULT["control"]["median_survival"] == pytest.approx(GOLDEN_MEDIAN_CONTROL, abs=1e-9)
+    assert km_curve(RESULT, "control")["median_survival"] == pytest.approx(GOLDEN_MEDIAN_CONTROL, abs=1e-9)
 
 
 def test_treatment_median_matches_published_value():
-    assert RESULT["treatment"]["median_survival"] == pytest.approx(GOLDEN_MEDIAN_TREATMENT, abs=1e-9)
+    assert km_curve(RESULT, "treatment")["median_survival"] == pytest.approx(GOLDEN_MEDIAN_TREATMENT, abs=1e-9)
 
 
 def test_control_checkpoints_match_published_survival_curve():
-    timeline = RESULT["control"]["timeline"]
-    survival = RESULT["control"]["survival_probability"]
+    timeline = km_curve(RESULT, "control")["timeline"]
+    survival = km_curve(RESULT, "control")["survival_probability"]
     for week, expected in GOLDEN_CONTROL_CHECKPOINTS.items():
         actual = _survival_at(timeline, survival, week)
         assert actual == pytest.approx(expected, abs=CHECKPOINT_TOLERANCE), f"week {week}"
 
 
 def test_treatment_checkpoints_match_published_survival_curve():
-    timeline = RESULT["treatment"]["timeline"]
-    survival = RESULT["treatment"]["survival_probability"]
+    timeline = km_curve(RESULT, "treatment")["timeline"]
+    survival = km_curve(RESULT, "treatment")["survival_probability"]
     for week, expected in GOLDEN_TREATMENT_CHECKPOINTS.items():
         actual = _survival_at(timeline, survival, week)
         assert actual == pytest.approx(expected, abs=CHECKPOINT_TOLERANCE), f"week {week}"

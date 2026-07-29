@@ -27,13 +27,14 @@ import pandas as pd
 import pytest
 
 from app.tasks.analysis import _run_kaplan_meier
+from tests.conftest import km_overall
 
 Z_95 = 1.959963984540054
 TOL = 1e-6
 
 DF = pd.DataFrame({"dur": [2, 3, 4, 5, 7, 9], "evt": [1, 1, 0, 1, 1, 0]})
 RESULT = _run_kaplan_meier(DF, {"time_column": "dur", "event_column": "evt", "has_censoring": True})
-OVERALL = RESULT["overall"]
+OVERALL = km_overall(RESULT)
 
 # Frozen golden constants (offline-computed exponential-Greenwood log-log):
 GOLDEN_CI_AT_T2 = (0.273123, 0.974712)

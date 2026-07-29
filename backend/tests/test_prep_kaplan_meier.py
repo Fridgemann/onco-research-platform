@@ -14,6 +14,7 @@ import pandas as pd
 import pytest
 
 from app.tasks.analysis import AnalysisValidationError, _run_kaplan_meier
+from tests.conftest import km_overall, km_labels
 
 
 def test_grouped_number_duration_is_normalized():
@@ -38,7 +39,7 @@ def test_numeric_looking_group_labels_are_preserved_not_coerced():
     result = _run_kaplan_meier(
         df, {"time_column": "dur", "event_column": "evt", "group_column": "grp"}
     )
-    assert set(result["group_labels"]) == {"0", "1"}
+    assert km_labels(result) == {(0.0, "number"), (1.0, "number")}
     assert result["processing"]["grp"]["role"] == "group"
     # group is categorical: no non-numeric framing
     assert "non_numeric" not in result["processing"]["grp"]
@@ -53,19 +54,19 @@ def test_string_group_labels_are_preserved():
     result = _run_kaplan_meier(
         df, {"time_column": "dur", "event_column": "evt", "group_column": "grp"}
     )
-    assert set(result["group_labels"]) == {"A", "B"}
+    assert km_labels(result) == {("A", "string"), ("B", "string")}
 
 
 def test_boolean_events_accepted_without_event_value():
     df = pd.DataFrame({"dur": [2, 3, 4, 5], "evt": [True, True, False, True]})
     result = _run_kaplan_meier(df, {"time_column": "dur", "event_column": "evt"})
-    assert result["overall"]["median_survival"] == pytest.approx(3.0)
+    assert km_overall(result)["median_survival"] == pytest.approx(3.0)
 
 
 def test_zero_one_events_accepted_without_event_value():
     df = pd.DataFrame({"dur": [2, 3, 4, 5], "evt": [1, 1, 0, 1]})
     result = _run_kaplan_meier(df, {"time_column": "dur", "event_column": "evt"})
-    assert result["overall"]["median_survival"] == pytest.approx(3.0)
+    assert km_overall(result)["median_survival"] == pytest.approx(3.0)
 
 
 def test_explicit_textual_event_mapping_supported():
@@ -83,7 +84,7 @@ def test_explicit_textual_event_mapping_supported():
             {"value": "censored", "value_type": "string", "role": "censored"},
         ],
     })
-    assert result["overall"]["median_survival"] == pytest.approx(3.0)
+    assert km_overall(result)["median_survival"] == pytest.approx(3.0)
 
 
 def test_ambiguous_numeric_event_encoding_rejected_when_unmapped():

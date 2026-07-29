@@ -448,21 +448,49 @@ def _median_or_none(kmf: "KaplanMeierFitter") -> float | None:
     return float(m) if np.isfinite(m) else None
 
 
+def _assert_json_safe(result: dict) -> None:
+    """Reject any NaN/Infinity before the result can be persisted.
+
+    Strict serialization is the guarantee that a non-finite statistic never
+    reaches the database or the frontend; the caller raises through the
+    sanitized task error path if this fails.
+    """
+    json.dumps(result, allow_nan=False)
+
+
 # Pilot-grade KM statistical conventions surfaced in every result.
 _KM_CI_METHOD = "exponential_greenwood_log_log"
 _KM_CI_LEVEL = 0.95
 _KM_AT_RISK_CONVENTION = "immediately_before"  # lifelines event_table at_risk
 _KM_ASSUMPTIONS = [
     "Censoring is assumed non-informative (independent of the event process).",
+    "Observations are assumed independent.",
+    "All subjects are assumed to share a consistently defined time origin and a "
+    "single, consistently defined event.",
     "Estimates are descriptive of this cohort, not causal.",
     "A censored observation means the subject was event-free up to that time; "
     "their status afterward is unknown.",
+    "Competing events (other outcomes that prevent the event of interest) are "
+    "treated as ordinary censoring, which can bias the estimate.",
     "Confidence intervals are pointwise 95% intervals (Greenwood variance with a "
     "log-log transformation), not simultaneous confidence bands.",
     "The log-rank test assesses whether survival curves differ; it does not "
-    "quantify the size or direction of any difference.",
+    "quantify the size or direction of any difference, and can miss or mislead "
+    "when curves cross or hazards are non-proportional.",
     "Survival beyond the largest observed time is undefined.",
 ]
+
+
+def _group_label_and_type(value) -> tuple:
+    """Return a JSON-safe (label, value_type) for a group value, preserving type.
+
+    Keeps numeric 1 distinct from string "1" so the collision-safe groups list
+    never conflates them.
+    """
+    key = _cell_status_key(value)
+    if key is None:
+        return (str(value), "string")
+    return (key[1], key[0])
 
 
 def _km_curve_payload(durations: pd.Series, event_observed: pd.Series) -> dict:
@@ -472,10 +500,24 @@ def _km_curve_payload(durations: pd.Series, event_observed: pd.Series) -> dict:
     (lifelines event_table convention), documented via _KM_AT_RISK_CONVENTION.
     """
     kmf = KaplanMeierFitter()
-    kmf.fit(durations=durations, event_observed=event_observed)
+    # alpha passed explicitly (95% CI) rather than relying on the library default.
+    kmf.fit(durations=durations, event_observed=event_observed, alpha=1 - _KM_CI_LEVEL)
     ci = kmf.confidence_interval_  # exponential Greenwood + log-log (lifelines default)
     et = kmf.event_table
     events = pd.Series(event_observed).astype(bool)
+
+    # Explicit censor coordinates so the frontend can place tick marks without
+    # reconstructing any statistic: survival value at each time where >=1
+    # censoring occurred (excluding the synthetic t=0 row).
+    censor_marks = []
+    for t, row in et.iterrows():
+        if t > 0 and int(row["censored"]) > 0:
+            censor_marks.append({
+                "time": float(t),
+                "survival_probability": float(kmf.predict(t)),
+                "count": int(row["censored"]),
+            })
+
     return {
         "timeline": kmf.survival_function_.index.tolist(),
         "survival_probability": kmf.survival_function_["KM_estimate"].tolist(),
@@ -491,6 +533,7 @@ def _km_curve_payload(durations: pd.Series, event_observed: pd.Series) -> dict:
             "events": et["observed"].tolist(),
             "censored": et["censored"].tolist(),
         },
+        "censor_marks": censor_marks,
     }
 
 
@@ -725,13 +768,22 @@ def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
         "assumptions": _KM_ASSUMPTIONS,
     }
 
+    # Curves live in a `groups` LIST (not top-level keys), so a group label
+    # like "counts" or "comparison", or a numeric 1 vs string "1", can never
+    # collide with metadata keys or each other.
     if not group_col:
-        return {
-            "overall": _km_curve_payload(durations, event_observed),
-            "group_labels": ["overall"],
+        result = {
+            "grouped": False,
+            "groups": [{
+                "label": "overall",
+                "value_type": "overall",
+                "curve": _km_curve_payload(durations, event_observed),
+            }],
             "comparison": None,
             **common,
         }
+        _assert_json_safe(result)
+        return result
 
     requested_max = int(params.get("max_groups", _KM_ABSOLUTE_MAX_GROUPS))
     effective_max = min(requested_max, _KM_ABSOLUTE_MAX_GROUPS)
@@ -745,29 +797,45 @@ def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
             "Use a categorical column with fewer distinct values."
         )
 
-    result: dict = dict(common)
-    group_labels: list[str] = []
+    groups_out = []
     for group in unique_groups:
         group_mask = groups == group
-        label = str(group)
-        group_labels.append(label)
-        result[label] = _km_curve_payload(durations[group_mask], event_observed[group_mask])
-    result["group_labels"] = group_labels
+        label, value_type = _group_label_and_type(group)
+        groups_out.append({
+            "label": label,
+            "value_type": value_type,
+            "curve": _km_curve_payload(durations[group_mask], event_observed[group_mask]),
+        })
 
-    # Group comparison via the multivariate (Mantel-Cox) log-rank test — only
-    # meaningful with at least two groups remaining after joint filtering.
-    if len(unique_groups) >= 2:
-        lr = multivariate_logrank_test(durations, groups, event_observed)
-        result["comparison"] = {
-            "test": "logrank",
-            "chi_square": float(lr.test_statistic),
-            "degrees_of_freedom": int(lr.degrees_of_freedom),
-            "p_value": float(lr.p_value),
-        }
-    else:
-        result["comparison"] = None
-
+    result = {"grouped": True, "groups": groups_out, "comparison": _km_comparison(durations, groups, event_observed, len(unique_groups)), **common}
+    _assert_json_safe(result)
     return result
+
+
+def _km_comparison(durations: pd.Series, groups: pd.Series, event_observed: pd.Series, n_groups: int) -> dict:
+    """Multivariate (Mantel-Cox) log-rank comparison, or a reason it is unavailable.
+
+    Never returns a spurious chi-square=0 / p=1 for degenerate inputs.
+    """
+    if n_groups < 2:
+        return {"available": False, "reason": "insufficient_groups"}
+    if int(pd.Series(event_observed).astype(bool).sum()) == 0:
+        return {"available": False, "reason": "no_observed_events"}
+    try:
+        lr = multivariate_logrank_test(durations, groups, event_observed)
+    except Exception:
+        # Defensive: never let a comparison failure crash the whole KM run
+        # (e.g. degenerate/pathological group arrays the library can't handle).
+        return {"available": False, "reason": "undefined"}
+    if not (np.isfinite(lr.test_statistic) and np.isfinite(lr.p_value)):
+        return {"available": False, "reason": "undefined"}
+    return {
+        "available": True,
+        "test": "logrank",
+        "chi_square": float(lr.test_statistic),
+        "degrees_of_freedom": int(lr.degrees_of_freedom),
+        "p_value": float(lr.p_value),
+    }
 
 
 
@@ -880,9 +948,12 @@ def run_analysis_task(self, job_id: str):
             }
             result = dispatch[job_type](df, params)
 
+            # Strict serialization: a NaN/Infinity anywhere in the result
+            # raises here and routes to the sanitized failure path rather than
+            # persisting a non-finite statistic.
             _set_job(session, job_id,
                      status=JobStatus.COMPLETED,
-                     result=json.dumps(result),
+                     result=json.dumps(result, allow_nan=False),
                      completed_at=datetime.now(timezone.utc))
             logger.info("Job %s completed successfully", job_id)
 
