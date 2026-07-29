@@ -2,7 +2,7 @@
 
 import type { AnalysisJob } from '@/lib/types'
 import ErrorBoundary from '@/components/ErrorBoundary'
-import KMCurveChart from './KMCurveChart'
+import KMResult from './KMResult'
 import DescriptiveStatsTable from './DescriptiveStatsTable'
 import RegressionResult from './RegressionResult'
 import LogisticRegressionResult from './LogisticRegressionResult'
@@ -77,7 +77,10 @@ function ResultPanelInner({ job }: { job: AnalysisJob }) {
       {(() => {
         switch (job.job_type) {
           case 'kaplan_meier':
-            return <KMCurveChart data={clean as Parameters<typeof KMCurveChart>[0]['data']} />
+            // KM returns a structured result (groups list + comparison +
+            // reproducibility), so it renders from the full result rather
+            // than the metadata-stripped dict.
+            return <KMResult data={result as unknown as Parameters<typeof KMResult>[0]['data']} />
           case 'descriptive_stats':
             return <DescriptiveStatsTable data={clean as Parameters<typeof DescriptiveStatsTable>[0]['data']} />
           case 'regression':
