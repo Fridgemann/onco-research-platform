@@ -166,7 +166,13 @@ async def km_preflight(
 
 
 async def _audit_preflight(db, user_id: str, dataset_id: str, status: str) -> None:
-    """Audit a KM preflight data-access. Detail carries no status cell values."""
+    """Audit a KM preflight data-access. Detail carries no status cell values.
+
+    Committed here rather than left to the request teardown: on the failure
+    paths this is followed by an HTTPException, and get_db rolls back on any
+    exception, which would otherwise discard the audit record of a dataset
+    access that really happened.
+    """
     await write_audit_log(
         db,
         action=AuditAction.ANALYSIS_PREFLIGHTED,
@@ -176,6 +182,7 @@ async def _audit_preflight(db, user_id: str, dataset_id: str, status: str) -> No
         status=status,
         detail=f"km_preflight dataset_id={dataset_id}",
     )
+    await db.commit()
 
 
 @jobs_router.get("/{job_id}", response_model=AnalysisJobResponse)

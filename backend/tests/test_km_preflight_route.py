@@ -103,6 +103,23 @@ async def test_unmapped_mapping_returns_ready_false_not_error():
     assert body["counts"]["unmapped_values"] == 2  # "relapse", "censored"
 
 
+async def test_failed_preflight_is_audited_and_committed(_patch_storage_and_audit):
+    # A validation failure still accessed and decrypted the dataset, so it must
+    # be audited with status="failed" — and committed, because get_db rolls the
+    # session back when the HTTPException propagates.
+    captured = _patch_storage_and_audit
+    db = _scalar_db(member=make_member(), dataset=make_dataset())
+    async with await _client(db) as ac:
+        r = await ac.post(PREFLIGHT_URL, json={
+            "time_column": "no_such_column", "event_column": "evt",
+            "has_censoring": True, "event_mapping": [],
+        })
+    assert r.status_code == 422
+    assert captured["action"].value == "analysis_preflighted"
+    assert captured["status"] == "failed"
+    db.commit.assert_awaited()
+
+
 async def test_audit_detail_contains_no_status_values(_patch_storage_and_audit):
     captured = _patch_storage_and_audit
     db = _scalar_db(member=make_member(), dataset=make_dataset())
