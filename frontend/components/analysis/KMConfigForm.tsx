@@ -108,22 +108,35 @@ export default function KMConfigForm({
 }) {
   const [validating, setValidating] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // `shown` is the display copy of the last preflight — it survives a mapping
+  // edit so the mapping controls stay usable. The parent's `preflight` is the
+  // submission gate and is cleared the moment anything changes, so stale
+  // counts can never authorize a run.
+  const [shown, setShown] = useState<KMPreflightResponse | null>(null)
+  const stale = !!shown && !preflight
 
-  // Any change to the columns or mapping invalidates a previous preflight —
-  // stale counts must never gate a submission.
-  const stamp = JSON.stringify([
+  // Changing a column or the censoring branch invalidates the status values
+  // themselves — drop the whole panel.
+  const columnStamp = JSON.stringify([
     config.time_column,
     config.event_column,
     config.group_column,
     config.has_censoring,
-    config.event_mapping,
-    config.all_events_confirmed,
   ])
   useEffect(() => {
     setPreflight(null)
+    setShown(null)
     setError(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stamp])
+  }, [columnStamp])
+
+  // Changing only the mapping or the all-events confirmation keeps the same
+  // status values: keep the panel visible, but re-gate submission.
+  const answerStamp = JSON.stringify([config.event_mapping, config.all_events_confirmed])
+  useEffect(() => {
+    setPreflight(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [answerStamp])
 
   const canValidate =
     !!config.time_column && (!config.has_censoring || !!config.event_column)
@@ -133,6 +146,7 @@ export default function KMConfigForm({
     setError(null)
     try {
       const res = await fetchKMPreflight(workspaceId, datasetId, toPreflightRequest(config))
+      setShown(res)
       setPreflight(res)
     } catch (err) {
       setPreflight(null)
@@ -254,10 +268,11 @@ export default function KMConfigForm({
 
       {error && <div className="alert-error">{error}</div>}
 
-      {preflight && (
+      {shown && (
         <PreflightSummary
-          preflight={preflight}
+          preflight={shown}
           config={config}
+          stale={stale}
           onRoleChange={(value, valueType, role) =>
             update({ event_mapping: setMappingRole(config.event_mapping, value, valueType, role) })
           }
@@ -270,10 +285,12 @@ export default function KMConfigForm({
 function PreflightSummary({
   preflight,
   config,
+  stale,
   onRoleChange,
 }: {
   preflight: KMPreflightResponse
   config: KMConfig
+  stale: boolean
   onRoleChange: (
     value: boolean | number | string | null,
     valueType: KMValueType,
@@ -298,11 +315,13 @@ function PreflightSummary({
       padding: '12px 14px',
       display: 'flex', flexDirection: 'column', gap: '12px',
     }}>
-      <p style={{ fontSize: '11px', color: preflight.ready ? '#3d8f5e' : '#c8a44a' }}>
-        {preflight.ready ? '✓ Ready to run' : '⚠ Not ready yet'}
+      <p style={{ fontSize: '11px', color: stale ? '#c8a44a' : preflight.ready ? '#3d8f5e' : '#c8a44a' }}>
+        {stale
+          ? '⟳ Configuration changed — validate again to refresh these counts'
+          : preflight.ready ? '✓ Ready to run' : '⚠ Not ready yet'}
       </p>
 
-      <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', opacity: stale ? 0.5 : 1 }}>
         {stat('Total rows', String(c.total_rows))}
         {stat('Included', String(c.used_rows))}
         {stat('Events', String(c.events))}
