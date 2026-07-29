@@ -5,8 +5,13 @@ import Link from 'next/link'
 import { apiFetch, ApiError } from '@/lib/api'
 import { getToken } from '@/lib/auth'
 import { useUser } from '@/lib/user-context'
-import type { Dataset, AnalysisJob, Workspace, WorkspaceInvite, WorkspaceMember } from '@/lib/types'
+import type {
+  Dataset, AnalysisJob, Workspace, WorkspaceInvite, WorkspaceMember, KMPreflightResponse,
+} from '@/lib/types'
 import ResultPanel from '@/components/analysis/ResultPanel'
+import KMConfigForm, {
+  EMPTY_KM_CONFIG, kmConfigToParams, type KMConfig,
+} from '@/components/analysis/KMConfigForm'
 
 type JobType = 'kaplan_meier' | 'descriptive_stats' | 'regression' | 'logistic_regression'
 
@@ -109,6 +114,9 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
   // Test selection (left panel)
   const [selectedTest, setSelectedTest] = useState<JobType | null>(null)
   const [jobParams, setJobParams] = useState<Record<string, string>>({})
+  // Kaplan-Meier uses a dedicated censoring-aware flow with a preflight gate.
+  const [kmConfig, setKmConfig] = useState<KMConfig>(EMPTY_KM_CONFIG)
+  const [kmPreflight, setKmPreflight] = useState<KMPreflightResponse | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
 
@@ -155,10 +163,15 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
 
   useEffect(() => {
     setJobParams({})
+    setKmConfig(EMPTY_KM_CONFIG)
+    setKmPreflight(null)
     setRightJobId(null)
   }, [selectedTest])
 
   useEffect(() => {
+    // A different dataset invalidates any column selection and preflight.
+    setKmConfig(EMPTY_KM_CONFIG)
+    setKmPreflight(null)
     setRightJobId(null)
   }, [selectedDatasetId])
 
@@ -213,12 +226,17 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
     setSubmitting(true)
     setSubmitError(null)
     try {
-      const parameters: Record<string, unknown> = {}
-      for (const [k, v] of Object.entries(jobParams)) {
-        if (k.endsWith('_columns') || k === 'columns') {
-          parameters[k] = v.split(',').map((s) => s.trim()).filter(Boolean)
-        } else {
-          parameters[k] = v
+      let parameters: Record<string, unknown> = {}
+      if (selectedTest === 'kaplan_meier') {
+        // Typed KM parameters (mapping values keep their original JSON types).
+        parameters = kmConfigToParams(kmConfig)
+      } else {
+        for (const [k, v] of Object.entries(jobParams)) {
+          if (k.endsWith('_columns') || k === 'columns') {
+            parameters[k] = v.split(',').map((s) => s.trim()).filter(Boolean)
+          } else {
+            parameters[k] = v
+          }
         }
       }
       const job = await apiFetch<AnalysisJob>(
@@ -581,10 +599,31 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
                 onSubmit={handleRunAnalysis}
                 style={{ display: 'flex', flexDirection: 'column', gap: '14px', marginBottom: '28px' }}
               >
-                <AnalysisParamFields jobType={selectedTest} params={jobParams} setParams={setJobParams} />
+                {selectedTest === 'kaplan_meier' ? (
+                  <KMConfigForm
+                    workspaceId={id}
+                    datasetId={selectedDatasetId}
+                    columns={datasetColumns}
+                    config={kmConfig}
+                    setConfig={setKmConfig}
+                    preflight={kmPreflight}
+                    setPreflight={setKmPreflight}
+                  />
+                ) : (
+                  <AnalysisParamFields jobType={selectedTest} params={jobParams} setParams={setJobParams} />
+                )}
                 {submitError && <div className="alert-error">{submitError}</div>}
                 <div>
-                  <button type="submit" disabled={submitting} className="btn btn-primary">
+                  <button
+                    type="submit"
+                    disabled={submitting || (selectedTest === 'kaplan_meier' && !kmPreflight?.ready)}
+                    className="btn btn-primary"
+                    title={
+                      selectedTest === 'kaplan_meier' && !kmPreflight?.ready
+                        ? 'Validate the configuration first'
+                        : undefined
+                    }
+                  >
                     {submitting ? <><span className="spinner" /> Running…</> : 'Run analysis'}
                   </button>
                 </div>
