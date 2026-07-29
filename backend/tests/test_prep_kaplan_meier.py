@@ -70,28 +70,35 @@ def test_zero_one_events_accepted_without_event_value():
     assert result["overall"]["median_survival"] == pytest.approx(3.0)
 
 
-def test_explicit_textual_event_value_supported():
+def test_explicit_textual_event_mapping_supported():
+    # Replaces the old single-value event_value path with the typed mapping.
     df = pd.DataFrame({
         "dur": [2, 3, 4, 5],
         "evt": ["relapse", "relapse", "censored", "relapse"],
     })
-    result = _run_kaplan_meier(
-        df, {"time_column": "dur", "event_column": "evt", "event_value": "relapse"}
-    )
+    result = _run_kaplan_meier(df, {
+        "time_column": "dur",
+        "event_column": "evt",
+        "has_censoring": True,
+        "event_mapping": [
+            {"value": "relapse", "value_type": "string", "role": "event"},
+            {"value": "censored", "value_type": "string", "role": "censored"},
+        ],
+    })
     assert result["overall"]["median_survival"] == pytest.approx(3.0)
 
 
-def test_ambiguous_event_encoding_rejected_without_event_value():
-    # Values other than 0/1/boolean (here a "2") are ambiguous when no
-    # event_value is given — reject rather than guess.
+def test_ambiguous_numeric_event_encoding_rejected_when_unmapped():
+    # A "2" is not auto-mapped and has no explicit mapping — reject rather
+    # than guess. Message reports a count, never the raw value.
     df = pd.DataFrame({"dur": [2, 3, 4, 5], "evt": [1, 2, 1, 2]})
-    with pytest.raises(AnalysisValidationError, match="boolean or coded 0/1"):
+    with pytest.raises(AnalysisValidationError, match="unmapped"):
         _run_kaplan_meier(df, {"time_column": "dur", "event_column": "evt"})
 
 
-def test_string_event_encoding_rejected_without_event_value():
+def test_string_event_encoding_rejected_when_unmapped():
     df = pd.DataFrame({"dur": [2, 3, 4, 5], "evt": ["yes", "no", "yes", "no"]})
-    with pytest.raises(AnalysisValidationError, match="boolean or coded 0/1"):
+    with pytest.raises(AnalysisValidationError, match="unmapped"):
         _run_kaplan_meier(df, {"time_column": "dur", "event_column": "evt"})
 
 

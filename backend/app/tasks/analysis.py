@@ -1,6 +1,7 @@
 import io
 import json
 import logging
+import math
 import re
 from datetime import datetime, timezone
 
@@ -336,60 +337,224 @@ def _run_regression(df: pd.DataFrame, params: dict) -> dict:
 _KM_ABSOLUTE_MAX_GROUPS = settings.KM_ABSOLUTE_MAX_GROUPS
 _KM_MAX_UNIQUE_TIMES = settings.KM_MAX_UNIQUE_TIMES
 
+# ── Kaplan-Meier event/censoring mapping ────────────────────────────────────
+#
+# The censoring status of each row is resolved through an explicit, typed
+# mapping — never inferred from the duration, and never by treating "not an
+# event" as censored. Values are matched by a normalized (value_type, value)
+# key rather than raw Python equality, because Python's `True == 1` and
+# `False == 0` would otherwise conflate booleans with the numbers 0/1.
 
-def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
+_KM_SUPPORTED_VALUE_TYPES = {"boolean", "number", "string"}
+_KM_MAPPING_ROLES = {"event", "censored", "exclude"}
+
+# Only these exact keys auto-map; strings "1"/"0" deliberately never do.
+_KM_AUTO_MAP = {
+    ("boolean", True): "event",
+    ("boolean", False): "censored",
+    ("number", 1.0): "event",
+    ("number", 0.0): "censored",
+}
+
+
+def _normalize_mapping_key(value, value_type: str) -> tuple:
+    """Normalize a mapping entry's declared value into a match key.
+
+    Raises AnalysisValidationError (no raw value echoed) for unsupported
+    types, type/value mismatches, or non-finite numbers.
+    """
+    if value_type == "boolean":
+        if not isinstance(value, bool):
+            raise AnalysisValidationError("A boolean event-mapping entry must be true or false.")
+        return ("boolean", bool(value))
+    if value_type == "number":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise AnalysisValidationError("A numeric event-mapping entry must be a number.")
+        if not math.isfinite(value):
+            raise AnalysisValidationError("A numeric event-mapping entry must be a finite number.")
+        return ("number", float(value))
+    if value_type == "string":
+        if not isinstance(value, str):
+            raise AnalysisValidationError("A string event-mapping entry must be text.")
+        return ("string", value)
+    raise AnalysisValidationError("Unsupported value_type in event mapping.")
+
+
+def _cell_status_key(cell) -> tuple | None:
+    """Normalize a raw status cell into a match key, or None if unusable.
+
+    Booleans are checked before numbers on purpose: isinstance(True, int) is
+    True in Python, so a bool must resolve to ("boolean", ...) and never to
+    ("number", 1.0). Non-finite numbers and unsupported types return None.
+    """
+    if isinstance(cell, (bool, np.bool_)):
+        return ("boolean", bool(cell))
+    if isinstance(cell, (int, float, np.integer, np.floating)):
+        f = float(cell)
+        return ("number", f) if math.isfinite(f) else None
+    if isinstance(cell, str):
+        return ("string", cell)
+    return None
+
+
+def _build_event_mapping(event_mapping: list) -> dict:
+    """Turn a list of {value, value_type, role} entries into a key->role dict.
+
+    Rejects duplicate or conflicting keys and invalid roles/types. No raw
+    values appear in any error message.
+    """
+    resolved: dict[tuple, str] = {}
+    for entry in event_mapping:
+        role = entry.get("role")
+        if role not in _KM_MAPPING_ROLES:
+            raise AnalysisValidationError("Each event-mapping role must be Event, Censored, or Exclude.")
+        key = _normalize_mapping_key(entry.get("value"), entry.get("value_type"))
+        if key in resolved:
+            raise AnalysisValidationError("Duplicate or conflicting event-mapping entries for a status value.")
+        resolved[key] = role
+    return resolved
+
+
+def _classify_km_status(series: pd.Series, mapping: dict) -> tuple[pd.Series, int]:
+    """Classify every status cell into event / censored / excluded / unmapped / missing.
+
+    Explicit mapping wins over auto-mapping. Returns a full-index role Series
+    plus the count of DISTINCT unmapped values (for a value-free error).
+    """
+    roles = pd.Series("missing", index=series.index, dtype=object)
+    unmapped_keys: set = set()
+    for idx, cell in series.items():
+        if pd.isna(cell):
+            continue
+        key = _cell_status_key(cell)
+        role = mapping.get(key) if key is not None else None
+        if role is None and key is not None:
+            role = _KM_AUTO_MAP.get(key)
+        if role is None:
+            roles.at[idx] = "unmapped"
+            unmapped_keys.add(key if key is not None else ("__unsupported__",))
+        elif role == "exclude":
+            roles.at[idx] = "excluded"
+        else:
+            roles.at[idx] = role  # "event" or "censored"
+    return roles, len(unmapped_keys)
+
+
+def _median_or_none(kmf: "KaplanMeierFitter") -> float | None:
+    """Median survival, or None when the curve never reaches 0.5 ("not reached")."""
+    m = kmf.median_survival_time_
+    return float(m) if np.isfinite(m) else None
+
+
+def _km_prepare(df: pd.DataFrame, params: dict) -> dict:
+    """Shared KM data preparation: coerce duration, resolve censoring, align rows.
+
+    Single source of truth for both the preflight endpoint (counts only) and
+    the Celery KM run (fit), so preflight counts always equal final counts.
+    Duration is the only numeric role; status and group are categorical and
+    never numerically coerced. Row alignment uses one joint validity mask.
+    """
     time_col = params["time_column"]
-    event_col = params["event_column"]
     group_col = params.get("group_column")
-    event_value = params.get("event_value")  # e.g. 2 for R convention, or a label like "relapse"
+    has_censoring = params.get("has_censoring", True)
+    event_col = params.get("event_column")
+    event_mapping = params.get("event_mapping") or []
+    all_events_confirmed = bool(params.get("all_events_confirmed", False))
 
-    selected = [time_col, event_col] + ([group_col] if group_col else [])
-    _check_columns(df, selected)
+    needed = [time_col] + ([group_col] if group_col else [])
+    if has_censoring:
+        if not event_col:
+            raise AnalysisValidationError(
+                "A status column is required when the dataset contains censored observations."
+            )
+        needed.append(event_col)
+    _check_columns(df, needed)
 
     processing: dict[str, dict] = {}
-    joint_valid = pd.Series(True, index=df.index)
+    joint = pd.Series(True, index=df.index)
 
-    # Duration is the only numeric role — coerce + normalize it.
     dur = _coerce_numeric(df[time_col])
     processing[time_col] = _numeric_processing_report("duration", dur)
-    joint_valid &= dur["is_valid"]
+    joint &= dur["is_valid"]
 
-    # Event is a categorical role: its raw values are preserved, never
-    # numerically coerced. Encoding rules:
-    #   - no event_value: accept only boolean or exact 0/1; anything else is
-    #     ambiguous (e.g. is "2" an event or a second censoring code?) and is
-    #     rejected rather than guessed.
-    #   - explicit event_value: any encoding is allowed, compared for exact
-    #     equality against the preserved raw value (supports labels like
-    #     "relapse" without inference).
-    event_valid, processing[event_col] = _categorical_processing_report(df[event_col], "event")
-    if event_value is None:
-        non_missing_events = set(df[event_col].dropna().unique())
-        # {0, 1} covers ints, floats (0.0/1.0), and bools (True==1, False==0)
-        # by value equality; string "0"/"1" is deliberately NOT accepted here.
-        if not non_missing_events.issubset({0, 1}):
-            raise AnalysisValidationError(
-                "Event column must be boolean or coded 0/1 when no event value "
-                "is specified. Provide an explicit event value to use other "
-                "encodings."
-            )
-    joint_valid &= event_valid
-
-    # Group is a categorical role — never coerced, even when the labels look
-    # numeric (e.g. treatment arm coded 0/1/2). Raw labels are preserved.
+    missing_group = 0
     if group_col:
         group_valid, processing[group_col] = _categorical_processing_report(df[group_col], "group")
-        joint_valid &= group_valid
+        joint &= group_valid
+        missing_group = int((~group_valid).sum())
 
-    meta = _dropna_stats(df, df[joint_valid])
-    if not bool(joint_valid.any()):
-        raise AnalysisValidationError(
-            "No rows have usable values across the selected columns."
-        )
+    missing_status = 0
+    explicitly_excluded = 0
+    if has_censoring:
+        mapping = _build_event_mapping(event_mapping)
+        roles, n_unmapped = _classify_km_status(df[event_col], mapping)
+        if n_unmapped > 0:
+            raise AnalysisValidationError(
+                f"{n_unmapped} distinct status value(s) are unmapped. "
+                "Map each remaining value to Event, Censored, or Exclude."
+            )
+        missing_status = int((roles == "missing").sum())
+        explicitly_excluded = int((roles == "excluded").sum())
+        status_valid = roles.isin(["event", "censored"])
+        joint &= status_valid
+        event_observed_full = (roles == "event")
+        processing[event_col] = {"role": "event", "missing": missing_status}
+    else:
+        if not all_events_confirmed:
+            raise AnalysisValidationError(
+                "Enable censoring and provide a status column, or explicitly confirm "
+                "that every included row is an observed event."
+            )
+        # No status column is consulted; every usable row is an observed event.
+        event_observed_full = pd.Series(True, index=df.index)
 
-    durations = dur["coerced"][joint_valid]
-    event_raw = df[event_col][joint_valid]
-    event_observed = (event_raw == event_value) if event_value is not None else event_raw
+    total = len(df)
+    used = int(joint.sum())
+    if used == 0:
+        raise AnalysisValidationError("No rows have usable values across the selected columns.")
+
+    event_observed = event_observed_full[joint].astype(bool)
+    events = int(event_observed.sum())
+    censored = used - events
+
+    counts = {
+        "total_rows": total,
+        "used_rows": used,
+        "excluded_rows": total - used,
+        "events": events,
+        "censored": censored,
+        "censoring_percentage": (censored / used * 100.0) if used else 0.0,
+        # Per-reason counts may overlap (a row can be invalid for several
+        # reasons); excluded_rows above counts each excluded row only once.
+        "exclusions": {
+            "missing_duration": int(dur["missing_rows"]),
+            "invalid_duration": int(dur["non_numeric_rows"]),
+            "missing_status": missing_status,
+            "missing_group": missing_group,
+            "explicitly_excluded": explicitly_excluded,
+        },
+        "unmapped_values": 0,  # >0 would have raised above
+    }
+
+    return {
+        "durations": dur["coerced"][joint],
+        "event_observed": event_observed,
+        "groups": df[group_col][joint] if group_col else None,
+        "processing": processing,
+        "meta": _dropna_stats(df, df[joint]),
+        "counts": counts,
+        "joint_valid": joint,
+    }
+
+
+def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
+    prep = _km_prepare(df, params)
+    durations = prep["durations"]
+    event_observed = prep["event_observed"]
+    groups = prep["groups"]
+    processing = prep["processing"]
+    meta = prep["meta"]
+    group_col = params.get("group_column")
 
     unique_times = durations.nunique()
     if unique_times > _KM_MAX_UNIQUE_TIMES:
@@ -405,13 +570,15 @@ def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
             "overall": {
                 "timeline": kmf.survival_function_.index.tolist(),
                 "survival_probability": kmf.survival_function_["KM_estimate"].tolist(),
-                "median_survival": float(kmf.median_survival_time_)
+                "median_survival": _median_or_none(kmf),
+                "n": int(len(durations)),
+                "n_events": int(event_observed.sum()),
+                "n_censored": int((~event_observed).sum()),
             },
             "processing": processing,
             "_meta": meta,
         }
 
-    groups = df[group_col][joint_valid]
     requested_max = int(params.get("max_groups", _KM_ABSOLUTE_MAX_GROUPS))
     effective_max = min(requested_max, _KM_ABSOLUTE_MAX_GROUPS)
 
@@ -427,12 +594,16 @@ def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
     result: dict = {"processing": processing, "_meta": meta}
     for group in unique_groups:
         group_mask = groups == group
+        group_events = event_observed[group_mask]
         kmf = KaplanMeierFitter()
-        kmf.fit(durations=durations[group_mask], event_observed=event_observed[group_mask])
+        kmf.fit(durations=durations[group_mask], event_observed=group_events)
         result[str(group)] = {
             "timeline": kmf.survival_function_.index.tolist(),
             "survival_probability": kmf.survival_function_["KM_estimate"].tolist(),
-            "median_survival": float(kmf.median_survival_time_)
+            "median_survival": _median_or_none(kmf),
+            "n": int(group_mask.sum()),
+            "n_events": int(group_events.sum()),
+            "n_censored": int((~group_events).sum()),
         }
     return result
 
