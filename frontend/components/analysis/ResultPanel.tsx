@@ -50,7 +50,9 @@ function stripInternalKeys(result: Record<string, unknown>): Record<string, unkn
   // Remove keys the analysis components should not treat as data. _meta and
   // processing are cross-cutting reporting fields; leaving `processing` in
   // would, for example, make KMCurveChart render it as a survival group.
-  const { _meta: _m, processing: _p, ...rest } = result
+  const rest = { ...result }
+  delete rest._meta
+  delete rest.processing
   return rest
 }
 
