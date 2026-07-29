@@ -240,7 +240,7 @@ def test_preflight_counts_match_final_analysis_counts():
     run = _run_kaplan_meier(df, params)
 
     # sum the per-group counts from the final run and compare to preflight
-    group_keys = [k for k in run if k not in ("processing", "_meta")]
+    group_keys = run["group_labels"]
     total_events = sum(run[g]["n_events"] for g in group_keys)
     total_censored = sum(run[g]["n_censored"] for g in group_keys)
     total_n = sum(run[g]["n"] for g in group_keys)

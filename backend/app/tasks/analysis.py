@@ -19,7 +19,9 @@ from app.models.user import User  # noqa: F401 — needed for FK resolution
 from app.models.workspace import Workspace, WorkspaceMember  # noqa: F401 — needed for FK resolution
 from app.services.storage import _sync_download
 
+import lifelines
 from lifelines import KaplanMeierFitter
+from lifelines.statistics import multivariate_logrank_test
 
 logger = logging.getLogger(__name__)
 
@@ -446,6 +448,72 @@ def _median_or_none(kmf: "KaplanMeierFitter") -> float | None:
     return float(m) if np.isfinite(m) else None
 
 
+# Pilot-grade KM statistical conventions surfaced in every result.
+_KM_CI_METHOD = "exponential_greenwood_log_log"
+_KM_CI_LEVEL = 0.95
+_KM_AT_RISK_CONVENTION = "immediately_before"  # lifelines event_table at_risk
+_KM_ASSUMPTIONS = [
+    "Censoring is assumed non-informative (independent of the event process).",
+    "Estimates are descriptive of this cohort, not causal.",
+    "A censored observation means the subject was event-free up to that time; "
+    "their status afterward is unknown.",
+    "Confidence intervals are pointwise 95% intervals (Greenwood variance with a "
+    "log-log transformation), not simultaneous confidence bands.",
+    "The log-rank test assesses whether survival curves differ; it does not "
+    "quantify the size or direction of any difference.",
+    "Survival beyond the largest observed time is undefined.",
+]
+
+
+def _km_curve_payload(durations: pd.Series, event_observed: pd.Series) -> dict:
+    """Fit one KM curve and return curve, pointwise CI, median, counts, at-risk table.
+
+    at_risk is the number at risk immediately before each time point
+    (lifelines event_table convention), documented via _KM_AT_RISK_CONVENTION.
+    """
+    kmf = KaplanMeierFitter()
+    kmf.fit(durations=durations, event_observed=event_observed)
+    ci = kmf.confidence_interval_  # exponential Greenwood + log-log (lifelines default)
+    et = kmf.event_table
+    events = pd.Series(event_observed).astype(bool)
+    return {
+        "timeline": kmf.survival_function_.index.tolist(),
+        "survival_probability": kmf.survival_function_["KM_estimate"].tolist(),
+        "ci_lower": ci.iloc[:, 0].tolist(),
+        "ci_upper": ci.iloc[:, 1].tolist(),
+        "median_survival": _median_or_none(kmf),
+        "n": int(len(durations)),
+        "n_events": int(events.sum()),
+        "n_censored": int((~events).sum()),
+        "risk_table": {
+            "time": et.index.tolist(),
+            "at_risk": et["at_risk"].tolist(),
+            "events": et["observed"].tolist(),
+            "censored": et["censored"].tolist(),
+        },
+    }
+
+
+def _km_reproducibility(params: dict) -> dict:
+    """Reproducibility metadata: parameters, library/version, CI method/level."""
+    return {
+        "parameters": {
+            "time_column": params.get("time_column"),
+            "event_column": params.get("event_column"),
+            "group_column": params.get("group_column"),
+            "has_censoring": params.get("has_censoring", True),
+            "event_mapping": params.get("event_mapping") or [],
+            "all_events_confirmed": bool(params.get("all_events_confirmed", False)),
+            "max_groups": params.get("max_groups"),
+        },
+        "library": "lifelines",
+        "library_version": lifelines.__version__,
+        "ci_method": _KM_CI_METHOD,
+        "ci_level": _KM_CI_LEVEL,
+        "at_risk_convention": _KM_AT_RISK_CONVENTION,
+    }
+
+
 def _km_prepare(df: pd.DataFrame, params: dict) -> dict:
     """Shared KM data preparation: coerce duration, resolve censoring, align rows.
 
@@ -563,20 +631,20 @@ def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
             "Round timestamps to whole days or months to reduce resolution."
         )
 
+    common = {
+        "processing": processing,
+        "_meta": meta,
+        "counts": prep["counts"],
+        "reproducibility": _km_reproducibility(params),
+        "assumptions": _KM_ASSUMPTIONS,
+    }
+
     if not group_col:
-        kmf = KaplanMeierFitter()
-        kmf.fit(durations=durations, event_observed=event_observed)
         return {
-            "overall": {
-                "timeline": kmf.survival_function_.index.tolist(),
-                "survival_probability": kmf.survival_function_["KM_estimate"].tolist(),
-                "median_survival": _median_or_none(kmf),
-                "n": int(len(durations)),
-                "n_events": int(event_observed.sum()),
-                "n_censored": int((~event_observed).sum()),
-            },
-            "processing": processing,
-            "_meta": meta,
+            "overall": _km_curve_payload(durations, event_observed),
+            "group_labels": ["overall"],
+            "comparison": None,
+            **common,
         }
 
     requested_max = int(params.get("max_groups", _KM_ABSOLUTE_MAX_GROUPS))
@@ -591,20 +659,28 @@ def _run_kaplan_meier(df: pd.DataFrame, params: dict) -> dict:
             "Use a categorical column with fewer distinct values."
         )
 
-    result: dict = {"processing": processing, "_meta": meta}
+    result: dict = dict(common)
+    group_labels: list[str] = []
     for group in unique_groups:
         group_mask = groups == group
-        group_events = event_observed[group_mask]
-        kmf = KaplanMeierFitter()
-        kmf.fit(durations=durations[group_mask], event_observed=group_events)
-        result[str(group)] = {
-            "timeline": kmf.survival_function_.index.tolist(),
-            "survival_probability": kmf.survival_function_["KM_estimate"].tolist(),
-            "median_survival": _median_or_none(kmf),
-            "n": int(group_mask.sum()),
-            "n_events": int(group_events.sum()),
-            "n_censored": int((~group_events).sum()),
+        label = str(group)
+        group_labels.append(label)
+        result[label] = _km_curve_payload(durations[group_mask], event_observed[group_mask])
+    result["group_labels"] = group_labels
+
+    # Group comparison via the multivariate (Mantel-Cox) log-rank test — only
+    # meaningful with at least two groups remaining after joint filtering.
+    if len(unique_groups) >= 2:
+        lr = multivariate_logrank_test(durations, groups, event_observed)
+        result["comparison"] = {
+            "test": "logrank",
+            "chi_square": float(lr.test_statistic),
+            "degrees_of_freedom": int(lr.degrees_of_freedom),
+            "p_value": float(lr.p_value),
         }
+    else:
+        result["comparison"] = None
+
     return result
 
 

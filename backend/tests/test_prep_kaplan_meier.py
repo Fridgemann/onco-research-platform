@@ -38,8 +38,7 @@ def test_numeric_looking_group_labels_are_preserved_not_coerced():
     result = _run_kaplan_meier(
         df, {"time_column": "dur", "event_column": "evt", "group_column": "grp"}
     )
-    group_keys = {k for k in result if k not in ("processing", "_meta")}
-    assert group_keys == {"0", "1"}
+    assert set(result["group_labels"]) == {"0", "1"}
     assert result["processing"]["grp"]["role"] == "group"
     # group is categorical: no non-numeric framing
     assert "non_numeric" not in result["processing"]["grp"]
@@ -54,8 +53,7 @@ def test_string_group_labels_are_preserved():
     result = _run_kaplan_meier(
         df, {"time_column": "dur", "event_column": "evt", "group_column": "grp"}
     )
-    group_keys = {k for k in result if k not in ("processing", "_meta")}
-    assert group_keys == {"A", "B"}
+    assert set(result["group_labels"]) == {"A", "B"}
 
 
 def test_boolean_events_accepted_without_event_value():
