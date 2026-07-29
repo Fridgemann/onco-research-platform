@@ -514,13 +514,37 @@ def _km_reproducibility(params: dict) -> dict:
     }
 
 
-def _km_prepare(df: pd.DataFrame, params: dict) -> dict:
-    """Shared KM data preparation: coerce duration, resolve censoring, align rows.
+_KM_MAX_STATUS_VALUES = 50      # a censoring indicator shouldn't have many distinct values
+_KM_MAX_MAPPING_ENTRIES = 200
 
-    Single source of truth for both the preflight endpoint (counts only) and
-    the Celery KM run (fit), so preflight counts always equal final counts.
-    Duration is the only numeric role; status and group are categorical and
-    never numerically coerced. Row alignment uses one joint validity mask.
+
+def _status_value_payload(key: tuple, count: int, mapping: dict) -> dict:
+    """Build a UI-facing status-value entry preserving the original type.
+
+    Returned to the authenticated dataset member only (never logged/audited).
+    """
+    if key == ("__unsupported__",):
+        value, value_type = None, "unsupported"
+    else:
+        value_type, value = key[0], key[1]
+    if key in mapping:
+        role = mapping[key]  # "event" | "censored" | "exclude"
+    else:
+        auto = _KM_AUTO_MAP.get(key)
+        role = f"auto_{auto}" if auto else "unmapped"
+    return {"value": value, "value_type": value_type, "count": count, "role": role}
+
+
+def _km_classify_and_count(df: pd.DataFrame, params: dict) -> dict:
+    """Resolve KM data preparation WITHOUT raising on fixable data-content states.
+
+    Single source of truth for both the run path (_km_prepare, which raises
+    when not ready) and the preflight endpoint (_km_preflight, which reports).
+    Genuine request-shape errors (unknown column, malformed/oversized mapping,
+    too many distinct status values) still raise AnalysisValidationError.
+    Fixable data states (unmapped values, missing all-events confirmation,
+    missing status column, no usable rows) are returned as `blockers` with
+    `ready=False`. No raw cell values appear in any raised message.
     """
     time_col = params["time_column"]
     group_col = params.get("group_column")
@@ -529,17 +553,17 @@ def _km_prepare(df: pd.DataFrame, params: dict) -> dict:
     event_mapping = params.get("event_mapping") or []
     all_events_confirmed = bool(params.get("all_events_confirmed", False))
 
+    if len(event_mapping) > _KM_MAX_MAPPING_ENTRIES:
+        raise AnalysisValidationError("Too many event-mapping entries.")
+
     needed = [time_col] + ([group_col] if group_col else [])
-    if has_censoring:
-        if not event_col:
-            raise AnalysisValidationError(
-                "A status column is required when the dataset contains censored observations."
-            )
+    if has_censoring and event_col:
         needed.append(event_col)
     _check_columns(df, needed)
 
     processing: dict[str, dict] = {}
     joint = pd.Series(True, index=df.index)
+    blockers: list[str] = []
 
     dur = _coerce_numeric(df[time_col])
     processing[time_col] = _numeric_processing_report("duration", dur)
@@ -553,37 +577,61 @@ def _km_prepare(df: pd.DataFrame, params: dict) -> dict:
 
     missing_status = 0
     explicitly_excluded = 0
+    status_values: list[dict] = []
+    event_observed_full = None
+
     if has_censoring:
-        mapping = _build_event_mapping(event_mapping)
-        roles, n_unmapped = _classify_km_status(df[event_col], mapping)
-        if n_unmapped > 0:
-            raise AnalysisValidationError(
-                f"{n_unmapped} distinct status value(s) are unmapped. "
-                "Map each remaining value to Event, Censored, or Exclude."
-            )
-        missing_status = int((roles == "missing").sum())
-        explicitly_excluded = int((roles == "excluded").sum())
-        status_valid = roles.isin(["event", "censored"])
-        joint &= status_valid
-        event_observed_full = (roles == "event")
-        processing[event_col] = {"role": "event", "missing": missing_status}
+        if not event_col:
+            blockers.append("no_status_column")
+        else:
+            mapping = _build_event_mapping(event_mapping)  # raises on bad entries
+            roles, n_unmapped = _classify_km_status(df[event_col], mapping)
+
+            # Distinct-value payload for the mapping UI (typed, capped).
+            counts_by_key: dict[tuple, int] = {}
+            for cell in df[event_col]:
+                if pd.isna(cell):
+                    continue
+                k = _cell_status_key(cell)
+                k = k if k is not None else ("__unsupported__",)
+                counts_by_key[k] = counts_by_key.get(k, 0) + 1
+            if len(counts_by_key) > _KM_MAX_STATUS_VALUES:
+                raise AnalysisValidationError(
+                    "Status column has too many distinct values to be a censoring "
+                    f"indicator (max {_KM_MAX_STATUS_VALUES})."
+                )
+            status_values = [
+                _status_value_payload(k, c, mapping) for k, c in counts_by_key.items()
+            ]
+
+            missing_status = int((roles == "missing").sum())
+            explicitly_excluded = int((roles == "excluded").sum())
+            status_valid = roles.isin(["event", "censored"])
+            joint &= status_valid
+            event_observed_full = (roles == "event")
+            processing[event_col] = {"role": "event", "missing": missing_status}
+            if n_unmapped > 0:
+                blockers.append("unmapped_values")
     else:
         if not all_events_confirmed:
-            raise AnalysisValidationError(
-                "Enable censoring and provide a status column, or explicitly confirm "
-                "that every included row is an observed event."
-            )
-        # No status column is consulted; every usable row is an observed event.
+            blockers.append("needs_all_events_confirmation")
+        # Projection: every usable row is an observed event.
         event_observed_full = pd.Series(True, index=df.index)
 
     total = len(df)
     used = int(joint.sum())
     if used == 0:
-        raise AnalysisValidationError("No rows have usable values across the selected columns.")
+        blockers.append("no_usable_rows")
 
-    event_observed = event_observed_full[joint].astype(bool)
-    events = int(event_observed.sum())
-    censored = used - events
+    if event_observed_full is not None:
+        event_observed = event_observed_full[joint].astype(bool)
+        events = int(event_observed.sum())
+        censored = used - events
+    else:
+        event_observed = None
+        events = censored = 0
+
+    n_unmapped_total = sum(1 for v in status_values if v["role"] == "unmapped")
 
     counts = {
         "total_rows": total,
@@ -601,7 +649,7 @@ def _km_prepare(df: pd.DataFrame, params: dict) -> dict:
             "missing_group": missing_group,
             "explicitly_excluded": explicitly_excluded,
         },
-        "unmapped_values": 0,  # >0 would have raised above
+        "unmapped_values": n_unmapped_total,
     }
 
     return {
@@ -611,7 +659,45 @@ def _km_prepare(df: pd.DataFrame, params: dict) -> dict:
         "processing": processing,
         "meta": _dropna_stats(df, df[joint]),
         "counts": counts,
+        "status_values": status_values,
         "joint_valid": joint,
+        "blockers": blockers,
+        "ready": not blockers,
+    }
+
+
+_KM_BLOCKER_MESSAGES = {
+    "no_status_column": "A status column is required when the dataset contains censored observations.",
+    "unmapped_values": "Some status values are unmapped. Map each remaining value to Event, Censored, or Exclude.",
+    "needs_all_events_confirmation": (
+        "Enable censoring and provide a status column, or explicitly confirm that "
+        "every included row is an observed event."
+    ),
+    "no_usable_rows": "No rows have usable values across the selected columns.",
+}
+
+
+def _km_prepare(df: pd.DataFrame, params: dict) -> dict:
+    """Run-path KM prep: classify, then REJECT if not ready (backend authority).
+
+    The Celery task and any direct API submit always go through this, so a
+    frontend that skips preflight cannot bypass validation.
+    """
+    resolved = _km_classify_and_count(df, params)
+    if not resolved["ready"]:
+        first = resolved["blockers"][0]
+        raise AnalysisValidationError(_KM_BLOCKER_MESSAGES.get(first, "Invalid Kaplan-Meier configuration."))
+    return resolved
+
+
+def _km_preflight(df: pd.DataFrame, params: dict) -> dict:
+    """Preflight report: same counts as the run, without raising on fixable states."""
+    resolved = _km_classify_and_count(df, params)
+    return {
+        "ready": resolved["ready"],
+        "blockers": resolved["blockers"],
+        "counts": resolved["counts"],
+        "status_values": resolved["status_values"],
     }
 
 

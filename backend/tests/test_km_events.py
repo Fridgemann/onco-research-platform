@@ -119,14 +119,20 @@ def test_explicit_mapping_overrides_auto():
 
 # ── Unmapped rejection (value-free message) ─────────────────────────────────
 
-def test_unmapped_values_rejected_with_count_only():
-    df = pd.DataFrame({"dur": [2, 3, 4, 5], "evt": ["a", "b", "a", "c"]})
-    with pytest.raises(AnalysisValidationError) as exc:
+def test_unmapped_values_rejected_without_raw_values_in_message():
+    # Distinctive multi-char values that would be obvious if leaked into text.
+    df = pd.DataFrame({"dur": [2, 3, 4, 5], "evt": ["qzx1", "qzx2", "qzx1", "qzx3"]})
+    with pytest.raises(AnalysisValidationError, match="unmapped") as exc:
         _km_prepare(df, {"time_column": "dur", "event_column": "evt", "has_censoring": True})
     msg = str(exc.value)
-    assert "3 distinct status value" in msg  # a, b, c
-    for raw in ("a", "b", "c"):
-        assert f'"{raw}"' not in msg  # never echo raw values
+    for raw in ("qzx1", "qzx2", "qzx3"):
+        assert raw not in msg  # never echo raw values
+
+    # the exact unmapped count is available (value-free) via preflight instead
+    from app.tasks.analysis import _km_preflight
+    pre = _km_preflight(df, {"time_column": "dur", "event_column": "evt", "has_censoring": True})
+    assert pre["ready"] is False
+    assert pre["counts"]["unmapped_values"] == 3
 
 
 def test_duplicate_mapping_entries_rejected():

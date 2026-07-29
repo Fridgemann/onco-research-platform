@@ -1,18 +1,33 @@
+import io
 import json
+import logging
+import re
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import pandas as pd
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser
 from app.models.audit_log import AuditAction
 from app.core.database import get_db
+from app.core.rate_limit import limiter
+from app.core.security import decrypt_bytes
 from app.models.analysis_job import AnalysisJob
 from app.models.dataset import Dataset, DatasetStatus
 from app.models.workspace import WorkspaceMember
-from app.schemas.analysis import AnalysisJobCreate, AnalysisJobResponse
+from app.schemas.analysis import (
+    AnalysisJobCreate,
+    AnalysisJobResponse,
+    KMPreflightRequest,
+    KMPreflightResponse,
+)
+from app.services import storage
 from app.services.audit import write_audit_log
-from app.tasks.analysis import run_analysis_task
+from app.tasks.analysis import AnalysisValidationError, _km_preflight, run_analysis_task
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/datasets/{dataset_id}/analysis", tags=["analysis"])
 jobs_router = APIRouter(prefix="/analysis", tags=["analysis"])
@@ -96,6 +111,64 @@ async def submit_analysis_job(
     run_analysis_task.delay(job.id)
 
     return _job_to_response(job)
+
+
+@router.post("/km-preflight", response_model=KMPreflightResponse)
+@limiter.limit("30/minute")
+async def km_preflight(
+    workspace_id: str,
+    dataset_id: str,
+    body: KMPreflightRequest,
+    request: Request,          # required by the rate limiter
+    response: Response,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """Validate a Kaplan-Meier censoring configuration against a dataset and
+    return row/event/censoring counts plus per-status-value mapping roles,
+    without running the analysis.
+
+    Same workspace-member authorization as analysis submission. The dataset is
+    downloaded, decrypted, and parsed off the event loop. Status values are
+    returned to the authorized member for the mapping UI but are never placed
+    in logs, audit detail, errors, or the URL. `ready` here is advisory only —
+    the Celery run always re-validates via _km_prepare, so it cannot be
+    bypassed by a direct client.
+    """
+    dataset = await _get_dataset_or_404(workspace_id, dataset_id, current_user.id, db)
+
+    raw = await storage.download_object(dataset.object_key)
+
+    def _parse_and_preflight():
+        data = decrypt_bytes(raw)
+        df = pd.read_csv(io.StringIO(data.decode("utf-8")), index_col=False)
+        df = df.loc[:, ~df.columns.str.match(r"^Unnamed: \d+$")]
+        return _km_preflight(df, body.model_dump())
+
+    try:
+        result = await run_in_threadpool(_parse_and_preflight)
+    except AnalysisValidationError as exc:
+        # Developer-authored, value-free message — safe to surface.
+        raise HTTPException(status_code=422, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception:
+        # Never leak dataset-derived content; log without cell values.
+        logger.error("KM preflight failed for dataset %s (sanitized)", dataset_id)
+        raise HTTPException(status_code=422, detail="Could not process dataset for preflight.")
+
+    # Audit the data-access action. Detail carries no status values.
+    await write_audit_log(
+        db,
+        action=AuditAction.ANALYSIS_PREFLIGHTED,
+        user_id=current_user.id,
+        resource_type="dataset",
+        resource_id=dataset_id,
+        detail=f"km_preflight dataset_id={dataset_id}",
+    )
+
+    response.headers["Cache-Control"] = "no-store"
+    return result
 
 
 @jobs_router.get("/{job_id}", response_model=AnalysisJobResponse)
