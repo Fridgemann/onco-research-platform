@@ -15,10 +15,11 @@ import KMConfigForm, {
 
 type JobType = 'kaplan_meier' | 'descriptive_stats' | 'regression' | 'logistic_regression'
 
-// Polling for in-flight analysis jobs. The cap stops a job stuck in
-// "running" from polling indefinitely (~10 minutes at this interval).
+// Polling for in-flight analysis jobs. Polling gives up after this much
+// elapsed wall time so a job stuck in "running" can't poll forever; the
+// researcher is told it is still processing and can check again.
 const JOB_POLL_INTERVAL_MS = 2500
-const JOB_POLL_MAX_TICKS = 240
+const JOB_POLL_TIMEOUT_MS = 10 * 60 * 1000
 
 const JOB_TYPE_LABELS: Record<JobType, string> = {
   kaplan_meier: 'Kaplan–Meier Survival',
@@ -198,51 +199,72 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
     .sort()
     .join(',')
 
+  // Which active-job set polling gave up on, and a manual "check again"
+  // trigger. Keying the flag to the id set means a new set clears it without
+  // a reset effect.
+  const [timedOutFor, setTimedOutFor] = useState<string | null>(null)
+  const [pollAttempt, setPollAttempt] = useState(0)
+  const pollTimedOut = !!activeJobIds && timedOutFor === activeJobIds
+
   useEffect(() => {
     if (!activeJobIds) return
     const ids = activeJobIds.split(',')
-    let cancelled = false
-    let ticks = 0
+    const controller = new AbortController()
+    const startedAt = Date.now()
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | undefined
 
-    const timer = setInterval(async () => {
-      // Safety cap: a job stuck in "running" (dead worker, lost broker
-      // message) must not poll forever on a page left open.
-      if (++ticks > JOB_POLL_MAX_TICKS) {
-        clearInterval(timer)
+    const poll = async () => {
+      if (stopped) return
+
+      // Elapsed wall time, not tick count: a slow network makes each round
+      // trip longer, so counting ticks would silently stretch the cap.
+      if (Date.now() - startedAt > JOB_POLL_TIMEOUT_MS) {
+        setTimedOutFor(activeJobIds)
         return
       }
 
       const settled = await Promise.all(
         ids.map((jobId) =>
-          apiFetch<AnalysisJob>(`/api/analysis/${jobId}`).catch(() => null),
+          apiFetch<AnalysisJob>(`/api/analysis/${jobId}`, { signal: controller.signal })
+            .catch(() => null),
         ),
       )
-      if (cancelled) return
+      if (stopped) return
 
+      // Transient failures (offline, 5xx, aborted) yield null — keep the job
+      // as-is and try again on the next pass rather than surfacing an error.
       const fresh = settled.filter((j): j is AnalysisJob => j !== null)
-      if (fresh.length === 0) return // transient failure — retry next tick
-
-      setJobs((prev) => {
-        let changed = false
-        const next = prev.map((j) => {
-          const updated = fresh.find((f) => f.id === j.id)
-          if (updated && updated.status !== j.status) {
-            changed = true
-            return updated
-          }
-          return j
+      if (fresh.length > 0) {
+        setJobs((prev) => {
+          let changed = false
+          const next = prev.map((j) => {
+            const updated = fresh.find((f) => f.id === j.id)
+            if (updated && updated.status !== j.status) {
+              changed = true
+              return updated
+            }
+            return j
+          })
+          // Returning `prev` unchanged avoids a re-render that would otherwise
+          // tear down and restart this poller on every pass.
+          return changed ? next : prev
         })
-        // Returning `prev` unchanged avoids a re-render, which would otherwise
-        // restart this interval on every tick.
-        return changed ? next : prev
-      })
-    }, JOB_POLL_INTERVAL_MS)
+      }
+
+      // Scheduled only after the batch settles, so requests can never overlap
+      // even when a round trip takes longer than the interval.
+      timer = setTimeout(poll, JOB_POLL_INTERVAL_MS)
+    }
+
+    timer = setTimeout(poll, JOB_POLL_INTERVAL_MS)
 
     return () => {
-      cancelled = true
-      clearInterval(timer)
+      stopped = true
+      controller.abort()
+      if (timer) clearTimeout(timer)
     }
-  }, [activeJobIds])
+  }, [activeJobIds, pollAttempt])
 
   async function handleUpload(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -736,9 +758,27 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
                         <div className="alert-error">{rightJob.error_message}</div>
                       )}
                       {(rightJob.status === 'pending' || rightJob.status === 'running') && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)', fontSize: '12px' }}>
-                          <span className="spinner" /> Processing…
-                        </div>
+                        pollTimedOut ? (
+                          // Polling gave up waiting — the job is NOT marked
+                          // failed, it may still be running on the worker.
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: 'var(--text-secondary)', fontSize: '12px' }}>
+                            <span>Analysis is still processing. You can refresh later.</span>
+                            <button
+                              type="button"
+                              className="btn btn-outline btn-sm"
+                              onClick={() => {
+                                setTimedOutFor(null)
+                                setPollAttempt((n) => n + 1)
+                              }}
+                            >
+                              Check again
+                            </button>
+                          </div>
+                        ) : (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)', fontSize: '12px' }}>
+                            <span className="spinner" /> Processing…
+                          </div>
+                        )
                       )}
                     </div>
                   )}
