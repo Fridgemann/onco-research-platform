@@ -15,6 +15,11 @@ import KMConfigForm, {
 
 type JobType = 'kaplan_meier' | 'descriptive_stats' | 'regression' | 'logistic_regression'
 
+// Polling for in-flight analysis jobs. The cap stops a job stuck in
+// "running" from polling indefinitely (~10 minutes at this interval).
+const JOB_POLL_INTERVAL_MS = 2500
+const JOB_POLL_MAX_TICKS = 240
+
 const JOB_TYPE_LABELS: Record<JobType, string> = {
   kaplan_meier: 'Kaplan–Meier Survival',
   descriptive_stats: 'Descriptive Statistics',
@@ -183,6 +188,61 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
       .catch(() => setDatasetColumns([]))
       .finally(() => setColumnsLoading(false))
   }, [selectedDatasetId, id])
+
+  // Analyses run asynchronously on Celery, so a submitted job stays "pending"
+  // until something refetches it. Poll only the jobs that are still running,
+  // and stop as soon as they all reach a terminal state.
+  const activeJobIds = jobs
+    .filter((j) => j.status === 'pending' || j.status === 'running')
+    .map((j) => j.id)
+    .sort()
+    .join(',')
+
+  useEffect(() => {
+    if (!activeJobIds) return
+    const ids = activeJobIds.split(',')
+    let cancelled = false
+    let ticks = 0
+
+    const timer = setInterval(async () => {
+      // Safety cap: a job stuck in "running" (dead worker, lost broker
+      // message) must not poll forever on a page left open.
+      if (++ticks > JOB_POLL_MAX_TICKS) {
+        clearInterval(timer)
+        return
+      }
+
+      const settled = await Promise.all(
+        ids.map((jobId) =>
+          apiFetch<AnalysisJob>(`/api/analysis/${jobId}`).catch(() => null),
+        ),
+      )
+      if (cancelled) return
+
+      const fresh = settled.filter((j): j is AnalysisJob => j !== null)
+      if (fresh.length === 0) return // transient failure — retry next tick
+
+      setJobs((prev) => {
+        let changed = false
+        const next = prev.map((j) => {
+          const updated = fresh.find((f) => f.id === j.id)
+          if (updated && updated.status !== j.status) {
+            changed = true
+            return updated
+          }
+          return j
+        })
+        // Returning `prev` unchanged avoids a re-render, which would otherwise
+        // restart this interval on every tick.
+        return changed ? next : prev
+      })
+    }, JOB_POLL_INTERVAL_MS)
+
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [activeJobIds])
 
   async function handleUpload(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault()
