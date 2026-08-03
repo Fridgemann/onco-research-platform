@@ -24,8 +24,9 @@ from app.schemas.analysis import (
     KMPreflightResponse,
 )
 from app.services import storage
+from app.services.analysis_prep import AnalysisValidationError, _km_preflight
 from app.services.audit import write_audit_log
-from app.tasks.analysis import AnalysisValidationError, _km_preflight, run_analysis_task
+from app.tasks.analysis import run_analysis_task
 
 logger = logging.getLogger(__name__)
 

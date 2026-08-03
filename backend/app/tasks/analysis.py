@@ -19,6 +19,37 @@ from app.models.user import User  # noqa: F401 — needed for FK resolution
 from app.models.workspace import Workspace, WorkspaceMember  # noqa: F401 — needed for FK resolution
 from app.services.storage import _sync_download
 
+# Preparation and profiling live in a neutral service so the worker and the
+# API routes share one implementation (Milestone 4, Slice 1). Re-exported here
+# because this module is the historical import site for these names.
+from app.services.analysis_prep import (  # noqa: F401
+    AnalysisValidationError,
+    _assert_json_safe,
+    _binary_code_counts,
+    _build_event_mapping,
+    _categorical_processing_report,
+    _cell_status_key,
+    _check_columns,
+    _classify_km_status,
+    _CODE_STRING_MAX_LEN,
+    _coerce_numeric,
+    _dropna_stats,
+    _km_classify_and_count,
+    _km_prepare,
+    _km_preflight,
+    _KM_ABSOLUTE_MAX_GROUPS,
+    _KM_AUTO_MAP,
+    _KM_BLOCKER_MESSAGES,
+    _KM_MAX_UNIQUE_TIMES,
+    _MAX_FEATURE_COLS,
+    _normalize_mapping_key,
+    _numeric_processing_report,
+    _status_value_payload,
+    prepare_descriptive,
+    prepare_logistic,
+    prepare_regression,
+)
+
 import lifelines
 from lifelines import KaplanMeierFitter
 from lifelines.statistics import multivariate_logrank_test
@@ -45,201 +76,20 @@ def _set_job(session, job_id: str, **kwargs) -> None:
         logger.error("_set_job: 0 rows updated for job_id=%s kwargs=%s", job_id, list(kwargs))
 
 
-class AnalysisValidationError(ValueError):
-    """A safe, developer-authored validation message meant to reach the user.
-
-    Never raise this with dataset-derived values embedded (e.g. cell contents) —
-    only column names, counts, and limits. A plain ValueError (including one
-    raised by pandas/sklearn/lifelines, which may embed raw dataset content)
-    is treated as unsafe and goes through the sanitized catch-all path in
-    run_analysis_task instead of being logged/stored verbatim.
-    """
-
-
-def _check_columns(df: pd.DataFrame, *col_lists: list[str]) -> None:
-    all_cols = [c for cols in col_lists for c in cols]
-    missing = [c for c in all_cols if c not in df.columns]
-    if missing:
+def _run_descriptive_stats(df: pd.DataFrame, params: dict) -> dict:
+    # Preparation is shared with the preflight endpoint so reported counts and
+    # executed counts cannot diverge.
+    prep = prepare_descriptive(df, params)
+    if prep["empty_columns"]:
         raise AnalysisValidationError(
-            f"Column(s) not found: {missing}. "
-            "Check the available columns listed in the analysis form."
+            f"Column '{prep['empty_columns'][0]}' has no usable numeric values."
         )
 
-
-def _dropna_stats(df: pd.DataFrame, df_clean: pd.DataFrame) -> dict:
-    total = len(df)
-    used = len(df_clean)
-    return {"total_rows": total, "used_rows": used, "dropped_rows": total - used}
-
-
-_TOP_CODES_LIMIT = 5
-_CODE_STRING_MAX_LEN = 32
-_NORMALIZED_EXAMPLES_LIMIT = 3
-
-# English-style grouped thousands only: 1-3 leading digits, then one or more
-# ",ddd" groups of exactly 3 digits, optional decimal tail. Deliberately
-# strict — "1,23" (wrong group size) and "1.234,56" (European decimal comma)
-# do not match and are left as non-numeric/coded rather than guessed at.
-#
-# This assumes English number formatting (comma thousands separator, dot
-# decimal point). It will misread European-formatted numbers (e.g. "1.234,56"
-# meaning 1234.56) as non-numeric codes rather than parsing them — that's a
-# locale question, not something this helper decides. Locale selection can be
-# added later if a dataset needs it.
-_ENGLISH_GROUPED_NUMBER_RE = re.compile(r"^[+-]?\d{1,3}(,\d{3})+(\.\d+)?$")
-
-
-def _coerce_numeric(series: pd.Series) -> dict:
-    """Coerce a column to numeric without assuming non-numeric values are junk.
-
-    Values that fail conversion (e.g. 'ND', 'BLQ', '<5', assay flags) are kept
-    separate from true missing values so callers can report both distinctly
-    instead of silently dropping or misinterpreting them.
-
-    Only one narrow, unambiguous formatting convention is auto-corrected:
-    English-style thousands-grouped numbers (e.g. "1,234.56"). Everything
-    else that fails plain numeric parsing — units, comparison operators,
-    ambiguous locale formats, coded values — is reported, never guessed.
-    """
-    is_missing = series.isna()
-    numeric = pd.to_numeric(series, errors="coerce")
-
-    normalized_count = 0
-    normalized_examples: list[dict] = []
-
-    needs_retry = numeric.isna() & ~is_missing
-    if needs_retry.any():
-        candidates = series[needs_retry].astype(str).str.strip()
-        looks_grouped = candidates.str.match(_ENGLISH_GROUPED_NUMBER_RE)
-        if looks_grouped.any():
-            grouped_candidates = candidates[looks_grouped]
-            stripped = grouped_candidates.str.replace(",", "", regex=False)
-            parsed = pd.to_numeric(stripped, errors="coerce")
-            valid_parsed = parsed[~parsed.isna()]
-            numeric.loc[valid_parsed.index] = valid_parsed.values
-
-            normalized_count = int(len(valid_parsed))
-
-            # Up to N examples, deduped by the *complete* raw value so a
-            # frequently repeated value (e.g. "1,148" appearing 12 times)
-            # doesn't fill the whole example list with copies of itself, and
-            # two distinct long numbers sharing a prefix aren't conflated.
-            # Display truncation happens separately, after dedup.
-            raw_for_valid = grouped_candidates.loc[valid_parsed.index]
-            seen: dict[str, float] = {}
-            for raw_val, parsed_val in zip(raw_for_valid, valid_parsed):
-                if raw_val not in seen:
-                    seen[raw_val] = float(parsed_val)
-                    if len(seen) >= _NORMALIZED_EXAMPLES_LIMIT:
-                        break
-            normalized_examples = [
-                {
-                    "raw": raw if len(raw) <= _CODE_STRING_MAX_LEN else raw[:_CODE_STRING_MAX_LEN - 3] + "...",
-                    "parsed": parsed_val,
-                }
-                for raw, parsed_val in seen.items()
-            ]
-
-    is_valid = ~numeric.isna()
-    is_bad_code = ~is_valid & ~is_missing
-
-    codes = (
-        series[is_bad_code]
-        .astype(str)
-        .str.slice(0, _CODE_STRING_MAX_LEN)
-        .value_counts()
-        .head(_TOP_CODES_LIMIT)
-    )
-
-    return {
-        "values": numeric[is_valid],
-        # Full-index coerced series (normalization applied, NaN where the
-        # value was missing or non-numeric). Callers slice this on a JOINT
-        # validity mask so multiple columns stay row-aligned — never on this
-        # column's own is_valid mask alone.
-        "coerced": numeric,
-        "is_valid": is_valid,
-        "missing_rows": int(is_missing.sum()),
-        "non_numeric_rows": int(is_bad_code.sum()),
-        "top_non_numeric_codes": {str(k): int(v) for k, v in codes.items()},
-        "normalized_rows": normalized_count,
-        "normalized_rule": "english_thousands_grouping" if normalized_count else None,
-        "normalized_examples": normalized_examples,
-    }
-
-
-def _numeric_processing_report(role: str, coerced: dict) -> dict:
-    """Per-column processing summary for a numeric-role column.
-
-    Shared shape across every analysis (Milestone 2): role, missing count,
-    and the non-numeric / normalization detail that only applies to numeric
-    roles. Categorical roles use _categorical_processing_report instead and
-    never carry non_numeric fields.
-    """
-    return {
-        "role": role,
-        "missing": coerced["missing_rows"],
-        "non_numeric": coerced["non_numeric_rows"],
-        "top_non_numeric_codes": coerced["top_non_numeric_codes"],
-        "normalized": coerced["normalized_rows"],
-        "normalized_rule": coerced["normalized_rule"],
-        "normalized_examples": coerced["normalized_examples"],
-    }
-
-
-def _categorical_processing_report(series: pd.Series, role: str) -> tuple[pd.Series, dict]:
-    """Validity mask + processing summary for a categorical-role column.
-
-    Original labels are preserved untouched — only genuinely missing values
-    (NaN) are invalid. Valid non-numeric text (class labels, group names) is
-    NEVER reported as "non-numeric"; that field is omitted entirely here.
-    Returns (full_index_is_valid_mask, report).
-    """
-    is_valid = series.notna()
-    report = {"role": role, "missing": int((~is_valid).sum())}
-    return is_valid, report
-
-
-_BINARY_CODES = {0.0, 1.0}
-
-
-def _binary_code_counts(values: pd.Series) -> dict | None:
-    """If the usable values are exactly {0, 1} — both present, nothing else —
-    return count/percent for each code.
-
-    Exact equality, not subset: a column with only 0s (or only 1s) is a
-    constant column, not a demonstrated binary code, and is left as a plain
-    numeric column rather than presented as if it were binary-coded.
-
-    Never guesses what 0/1 *mean* (yes/no, male/female, etc.) — that's for
-    the researcher's own dataset documentation, not something this platform
-    infers from a column name or value pattern.
-    """
-    unique_vals = set(values.unique())
-    if unique_vals != _BINARY_CODES:
-        return None
-
-    total = int(values.count())
-    count_0 = int((values == 0.0).sum())
-    count_1 = int((values == 1.0).sum())
-    return {
-        "coded_0": {"count": count_0, "percent": (count_0 / total * 100) if total else 0.0},
-        "coded_1": {"count": count_1, "percent": (count_1 / total * 100) if total else 0.0},
-    }
-
-
-def _run_descriptive_stats(df: pd.DataFrame, params: dict) -> dict:
-    columns = params.get("columns") or df.select_dtypes(include=[np.number]).columns.tolist()
-    _check_columns(df, columns)
-
     result: dict = {}
-    joint_valid = pd.Series(True, index=df.index)
 
-    for col in columns:
-        coerced = _coerce_numeric(df[col])
-        values = coerced["values"]
-        if values.empty:
-            raise AnalysisValidationError(f"Column '{col}' has no usable numeric values.")
+    for col in prep["columns"]:
+        coerced = prep["per_column"][col]["coerced"]
+        values = prep["per_column"][col]["values"]
 
         binary_counts = _binary_code_counts(values)
 
@@ -261,39 +111,25 @@ def _run_descriptive_stats(df: pd.DataFrame, params: dict) -> dict:
             "is_binary": binary_counts is not None,
             "binary_counts": binary_counts,
         }
-        joint_valid &= coerced["is_valid"]
 
-    result["_meta"] = _dropna_stats(df, df[joint_valid])
+    result["_meta"] = prep["meta"]
     return result
-
-
-_MAX_FEATURE_COLS = 50
 
 
 def _run_regression(df: pd.DataFrame, params: dict) -> dict:
     from scipy.stats import linregress
 
-    target_col = params["target_column"]
-    feature_cols = params["feature_columns"]
-    if len(feature_cols) > _MAX_FEATURE_COLS:
-        raise AnalysisValidationError(f"Too many feature columns ({len(feature_cols)}); maximum is {_MAX_FEATURE_COLS}.")
+    # Preparation is shared with the preflight endpoint so reported counts and
+    # executed counts cannot diverge.
+    prep = prepare_regression(df, params)
+    target_col = prep["target_col"]
+    feature_cols = prep["feature_cols"]
+    coerced = prep["coerced"]
+    processing = prep["processing"]
+    joint_valid = prep["joint_valid"]
+    meta = prep["meta"]
 
-    _check_columns(df, [target_col], feature_cols)
-
-    # Linear regression: target AND every feature are numeric roles. Coerce
-    # each, then align on a single joint validity mask so every column keeps
-    # the same original rows — never filter columns independently.
-    coerced: dict[str, dict] = {}
-    processing: dict[str, dict] = {}
-    joint_valid = pd.Series(True, index=df.index)
-    for col, role in [(target_col, "target")] + [(f, "feature") for f in feature_cols]:
-        c = _coerce_numeric(df[col])
-        coerced[col] = c
-        processing[col] = _numeric_processing_report(role, c)
-        joint_valid &= c["is_valid"]
-
-    meta = _dropna_stats(df, df[joint_valid])
-    if not bool(joint_valid.any()):
+    if "no_usable_rows" in prep["blockers"]:
         raise AnalysisValidationError(
             "No rows have usable numeric values across the target and all feature columns."
         )
@@ -336,126 +172,10 @@ def _run_regression(df: pd.DataFrame, params: dict) -> dict:
     }
 
 
-_KM_ABSOLUTE_MAX_GROUPS = settings.KM_ABSOLUTE_MAX_GROUPS
-_KM_MAX_UNIQUE_TIMES = settings.KM_MAX_UNIQUE_TIMES
-
-# ── Kaplan-Meier event/censoring mapping ────────────────────────────────────
-#
-# The censoring status of each row is resolved through an explicit, typed
-# mapping — never inferred from the duration, and never by treating "not an
-# event" as censored. Values are matched by a normalized (value_type, value)
-# key rather than raw Python equality, because Python's `True == 1` and
-# `False == 0` would otherwise conflate booleans with the numbers 0/1.
-
-_KM_SUPPORTED_VALUE_TYPES = {"boolean", "number", "string"}
-_KM_MAPPING_ROLES = {"event", "censored", "exclude"}
-
-# Only these exact keys auto-map; strings "1"/"0" deliberately never do.
-_KM_AUTO_MAP = {
-    ("boolean", True): "event",
-    ("boolean", False): "censored",
-    ("number", 1.0): "event",
-    ("number", 0.0): "censored",
-}
-
-
-def _normalize_mapping_key(value, value_type: str) -> tuple:
-    """Normalize a mapping entry's declared value into a match key.
-
-    Raises AnalysisValidationError (no raw value echoed) for unsupported
-    types, type/value mismatches, or non-finite numbers.
-    """
-    if value_type == "boolean":
-        if not isinstance(value, bool):
-            raise AnalysisValidationError("A boolean event-mapping entry must be true or false.")
-        return ("boolean", bool(value))
-    if value_type == "number":
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise AnalysisValidationError("A numeric event-mapping entry must be a number.")
-        if not math.isfinite(value):
-            raise AnalysisValidationError("A numeric event-mapping entry must be a finite number.")
-        return ("number", float(value))
-    if value_type == "string":
-        if not isinstance(value, str):
-            raise AnalysisValidationError("A string event-mapping entry must be text.")
-        return ("string", value)
-    raise AnalysisValidationError("Unsupported value_type in event mapping.")
-
-
-def _cell_status_key(cell) -> tuple | None:
-    """Normalize a raw status cell into a match key, or None if unusable.
-
-    Booleans are checked before numbers on purpose: isinstance(True, int) is
-    True in Python, so a bool must resolve to ("boolean", ...) and never to
-    ("number", 1.0). Non-finite numbers and unsupported types return None.
-    """
-    if isinstance(cell, (bool, np.bool_)):
-        return ("boolean", bool(cell))
-    if isinstance(cell, (int, float, np.integer, np.floating)):
-        f = float(cell)
-        return ("number", f) if math.isfinite(f) else None
-    if isinstance(cell, str):
-        return ("string", cell)
-    return None
-
-
-def _build_event_mapping(event_mapping: list) -> dict:
-    """Turn a list of {value, value_type, role} entries into a key->role dict.
-
-    Rejects duplicate or conflicting keys and invalid roles/types. No raw
-    values appear in any error message.
-    """
-    resolved: dict[tuple, str] = {}
-    for entry in event_mapping:
-        role = entry.get("role")
-        if role not in _KM_MAPPING_ROLES:
-            raise AnalysisValidationError("Each event-mapping role must be Event, Censored, or Exclude.")
-        key = _normalize_mapping_key(entry.get("value"), entry.get("value_type"))
-        if key in resolved:
-            raise AnalysisValidationError("Duplicate or conflicting event-mapping entries for a status value.")
-        resolved[key] = role
-    return resolved
-
-
-def _classify_km_status(series: pd.Series, mapping: dict) -> tuple[pd.Series, int]:
-    """Classify every status cell into event / censored / excluded / unmapped / missing.
-
-    Explicit mapping wins over auto-mapping. Returns a full-index role Series
-    plus the count of DISTINCT unmapped values (for a value-free error).
-    """
-    roles = pd.Series("missing", index=series.index, dtype=object)
-    unmapped_keys: set = set()
-    for idx, cell in series.items():
-        if pd.isna(cell):
-            continue
-        key = _cell_status_key(cell)
-        role = mapping.get(key) if key is not None else None
-        if role is None and key is not None:
-            role = _KM_AUTO_MAP.get(key)
-        if role is None:
-            roles.at[idx] = "unmapped"
-            unmapped_keys.add(key if key is not None else ("__unsupported__",))
-        elif role == "exclude":
-            roles.at[idx] = "excluded"
-        else:
-            roles.at[idx] = role  # "event" or "censored"
-    return roles, len(unmapped_keys)
-
-
 def _median_or_none(kmf: "KaplanMeierFitter") -> float | None:
     """Median survival, or None when the curve never reaches 0.5 ("not reached")."""
     m = kmf.median_survival_time_
     return float(m) if np.isfinite(m) else None
-
-
-def _assert_json_safe(result: dict) -> None:
-    """Reject any NaN/Infinity before the result can be persisted.
-
-    Strict serialization is the guarantee that a non-finite statistic never
-    reaches the database or the frontend; the caller raises through the
-    sanitized task error path if this fails.
-    """
-    json.dumps(result, allow_nan=False)
 
 
 # Pilot-grade KM statistical conventions surfaced in every result.
@@ -554,193 +274,6 @@ def _km_reproducibility(params: dict) -> dict:
         "ci_method": _KM_CI_METHOD,
         "ci_level": _KM_CI_LEVEL,
         "at_risk_convention": _KM_AT_RISK_CONVENTION,
-    }
-
-
-_KM_MAX_STATUS_VALUES = 50      # a censoring indicator shouldn't have many distinct values
-_KM_MAX_MAPPING_ENTRIES = 200
-
-
-def _status_value_payload(key: tuple, count: int, mapping: dict) -> dict:
-    """Build a UI-facing status-value entry preserving the original type.
-
-    Returned to the authenticated dataset member only (never logged/audited).
-    """
-    if key == ("__unsupported__",):
-        value, value_type = None, "unsupported"
-    else:
-        value_type, value = key[0], key[1]
-    if key in mapping:
-        role = mapping[key]  # "event" | "censored" | "exclude"
-    else:
-        auto = _KM_AUTO_MAP.get(key)
-        role = f"auto_{auto}" if auto else "unmapped"
-    return {"value": value, "value_type": value_type, "count": count, "role": role}
-
-
-def _km_classify_and_count(df: pd.DataFrame, params: dict) -> dict:
-    """Resolve KM data preparation WITHOUT raising on fixable data-content states.
-
-    Single source of truth for both the run path (_km_prepare, which raises
-    when not ready) and the preflight endpoint (_km_preflight, which reports).
-    Genuine request-shape errors (unknown column, malformed/oversized mapping,
-    too many distinct status values) still raise AnalysisValidationError.
-    Fixable data states (unmapped values, missing all-events confirmation,
-    missing status column, no usable rows) are returned as `blockers` with
-    `ready=False`. No raw cell values appear in any raised message.
-    """
-    time_col = params["time_column"]
-    group_col = params.get("group_column")
-    has_censoring = params.get("has_censoring", True)
-    event_col = params.get("event_column")
-    event_mapping = params.get("event_mapping") or []
-    all_events_confirmed = bool(params.get("all_events_confirmed", False))
-
-    if len(event_mapping) > _KM_MAX_MAPPING_ENTRIES:
-        raise AnalysisValidationError("Too many event-mapping entries.")
-
-    needed = [time_col] + ([group_col] if group_col else [])
-    if has_censoring and event_col:
-        needed.append(event_col)
-    _check_columns(df, needed)
-
-    processing: dict[str, dict] = {}
-    joint = pd.Series(True, index=df.index)
-    blockers: list[str] = []
-
-    dur = _coerce_numeric(df[time_col])
-    processing[time_col] = _numeric_processing_report("duration", dur)
-    joint &= dur["is_valid"]
-
-    missing_group = 0
-    if group_col:
-        group_valid, processing[group_col] = _categorical_processing_report(df[group_col], "group")
-        joint &= group_valid
-        missing_group = int((~group_valid).sum())
-
-    missing_status = 0
-    explicitly_excluded = 0
-    status_values: list[dict] = []
-    event_observed_full = None
-
-    if has_censoring:
-        if not event_col:
-            blockers.append("no_status_column")
-        else:
-            mapping = _build_event_mapping(event_mapping)  # raises on bad entries
-            roles, n_unmapped = _classify_km_status(df[event_col], mapping)
-
-            # Distinct-value payload for the mapping UI (typed, capped).
-            counts_by_key: dict[tuple, int] = {}
-            for cell in df[event_col]:
-                if pd.isna(cell):
-                    continue
-                k = _cell_status_key(cell)
-                k = k if k is not None else ("__unsupported__",)
-                counts_by_key[k] = counts_by_key.get(k, 0) + 1
-            if len(counts_by_key) > _KM_MAX_STATUS_VALUES:
-                raise AnalysisValidationError(
-                    "Status column has too many distinct values to be a censoring "
-                    f"indicator (max {_KM_MAX_STATUS_VALUES})."
-                )
-            status_values = [
-                _status_value_payload(k, c, mapping) for k, c in counts_by_key.items()
-            ]
-
-            missing_status = int((roles == "missing").sum())
-            explicitly_excluded = int((roles == "excluded").sum())
-            status_valid = roles.isin(["event", "censored"])
-            joint &= status_valid
-            event_observed_full = (roles == "event")
-            processing[event_col] = {"role": "event", "missing": missing_status}
-            if n_unmapped > 0:
-                blockers.append("unmapped_values")
-    else:
-        if not all_events_confirmed:
-            blockers.append("needs_all_events_confirmation")
-        # Projection: every usable row is an observed event.
-        event_observed_full = pd.Series(True, index=df.index)
-
-    total = len(df)
-    used = int(joint.sum())
-    if used == 0:
-        blockers.append("no_usable_rows")
-
-    if event_observed_full is not None:
-        event_observed = event_observed_full[joint].astype(bool)
-        events = int(event_observed.sum())
-        censored = used - events
-    else:
-        event_observed = None
-        events = censored = 0
-
-    n_unmapped_total = sum(1 for v in status_values if v["role"] == "unmapped")
-
-    counts = {
-        "total_rows": total,
-        "used_rows": used,
-        "excluded_rows": total - used,
-        "events": events,
-        "censored": censored,
-        "censoring_percentage": (censored / used * 100.0) if used else 0.0,
-        # Per-reason counts may overlap (a row can be invalid for several
-        # reasons); excluded_rows above counts each excluded row only once.
-        "exclusions": {
-            "missing_duration": int(dur["missing_rows"]),
-            "invalid_duration": int(dur["non_numeric_rows"]),
-            "missing_status": missing_status,
-            "missing_group": missing_group,
-            "explicitly_excluded": explicitly_excluded,
-        },
-        "unmapped_values": n_unmapped_total,
-    }
-
-    return {
-        "durations": dur["coerced"][joint],
-        "event_observed": event_observed,
-        "groups": df[group_col][joint] if group_col else None,
-        "processing": processing,
-        "meta": _dropna_stats(df, df[joint]),
-        "counts": counts,
-        "status_values": status_values,
-        "joint_valid": joint,
-        "blockers": blockers,
-        "ready": not blockers,
-    }
-
-
-_KM_BLOCKER_MESSAGES = {
-    "no_status_column": "A status column is required when the dataset contains censored observations.",
-    "unmapped_values": "Some status values are unmapped. Map each remaining value to Event, Censored, or Exclude.",
-    "needs_all_events_confirmation": (
-        "Enable censoring and provide a status column, or explicitly confirm that "
-        "every included row is an observed event."
-    ),
-    "no_usable_rows": "No rows have usable values across the selected columns.",
-}
-
-
-def _km_prepare(df: pd.DataFrame, params: dict) -> dict:
-    """Run-path KM prep: classify, then REJECT if not ready (backend authority).
-
-    The Celery task and any direct API submit always go through this, so a
-    frontend that skips preflight cannot bypass validation.
-    """
-    resolved = _km_classify_and_count(df, params)
-    if not resolved["ready"]:
-        first = resolved["blockers"][0]
-        raise AnalysisValidationError(_KM_BLOCKER_MESSAGES.get(first, "Invalid Kaplan-Meier configuration."))
-    return resolved
-
-
-def _km_preflight(df: pd.DataFrame, params: dict) -> dict:
-    """Preflight report: same counts as the run, without raising on fixable states."""
-    resolved = _km_classify_and_count(df, params)
-    return {
-        "ready": resolved["ready"],
-        "blockers": resolved["blockers"],
-        "counts": resolved["counts"],
-        "status_values": resolved["status_values"],
     }
 
 
@@ -844,31 +377,17 @@ def _run_logistic_regression(df: pd.DataFrame, params: dict) -> dict:
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import roc_auc_score, accuracy_score
 
-    target_col = params["target_column"]
-    feature_cols = params["feature_columns"]
-    if len(feature_cols) > _MAX_FEATURE_COLS:
-        raise AnalysisValidationError(f"Too many feature columns ({len(feature_cols)}); maximum is {_MAX_FEATURE_COLS}.")
+    # Preparation is shared with the preflight endpoint so reported counts and
+    # executed counts cannot diverge.
+    prep = prepare_logistic(df, params)
+    target_col = prep["target_col"]
+    feature_cols = prep["feature_cols"]
+    coerced = prep["coerced"]
+    processing = prep["processing"]
+    joint_valid = prep["joint_valid"]
+    meta = prep["meta"]
 
-    _check_columns(df, [target_col], feature_cols)
-
-    # Features are numeric roles (coerce + normalize); the target is a
-    # categorical role — its original class labels are preserved exactly and
-    # never sent through numeric coercion. All columns align on one joint mask.
-    processing: dict[str, dict] = {}
-    joint_valid = pd.Series(True, index=df.index)
-
-    target_valid, processing[target_col] = _categorical_processing_report(df[target_col], "target")
-    joint_valid &= target_valid
-
-    coerced: dict[str, dict] = {}
-    for col in feature_cols:
-        c = _coerce_numeric(df[col])
-        coerced[col] = c
-        processing[col] = _numeric_processing_report("feature", c)
-        joint_valid &= c["is_valid"]
-
-    meta = _dropna_stats(df, df[joint_valid])
-    if not bool(joint_valid.any()):
+    if "no_usable_rows" in prep["blockers"]:
         raise AnalysisValidationError(
             "No rows have usable values across the target and all feature columns."
         )
@@ -881,7 +400,7 @@ def _run_logistic_regression(df: pd.DataFrame, params: dict) -> dict:
     # Binary classification only — require exactly two classes remaining after
     # joint filtering. Fewer than two means the outcome has no contrast to
     # model; more than two is unsupported (the result shape assumes binary).
-    n_classes = pd.Series(y).nunique()
+    n_classes = len(prep["classes"])
     if n_classes != 2:
         raise AnalysisValidationError(
             f"Logistic regression requires exactly two outcome classes after "
