@@ -731,3 +731,164 @@ def prepare_logistic(df: pd.DataFrame, params: dict) -> dict:
         "blockers": blockers,
         "ready": not blockers,
     }
+
+
+# ── Dataset profiling (Milestone 4) ─────────────────────────────────────────
+#
+# Powers the inspect endpoint. Reuses the same coercion and binary detection
+# the analyses use, so what a doctor is shown about a column matches how that
+# column will actually be treated when it is analysed.
+
+
+def _safe_cell(value, max_string_len: int):
+    """One cell, JSON-safe and type-preserving, with strings bounded.
+
+    Ints stay ints (58, not 58.0) so a preview reads like the file. Anything
+    non-finite or of an unsupported type becomes None rather than leaking a
+    NaN/Infinity into JSON.
+    """
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        f = float(value)
+        return f if math.isfinite(f) else None
+    if isinstance(value, str):
+        return value if len(value) <= max_string_len else value[:max_string_len - 3] + "..."
+    return None
+
+
+def _display_type(coerced: dict, values: pd.Series, n_rows: int) -> str:
+    """Non-authoritative hint for the role dropdowns.
+
+    Never stored, never used to decide clinical meaning — it only tells the
+    UI which columns are plausible for which role.
+    """
+    if coerced["missing_rows"] >= n_rows:
+        return "empty"          # nothing to describe; say so rather than guess
+    if values.empty:
+        return "categorical"    # present, but no usable numbers
+    if _binary_code_counts(values) is not None:
+        return "binary"
+    if coerced["non_numeric_rows"] == 0:
+        return "numeric"
+    return "categorical"
+
+
+def profile_dataset(df: pd.DataFrame, *, truncated: bool) -> dict:
+    """Describe a dataset for the inspect view.
+
+    `truncated` says whether the caller stopped reading before the end of the
+    file. When it did, the scope is reported as "partial" and `total_rows` is
+    null: every figure here describes `profiled_rows`, and a sampled count is
+    never presented as if it covered the whole cohort.
+    """
+    from app.schemas.dataset import (
+        INSPECT_MAX_COLUMN_NAME_LEN,
+        INSPECT_MAX_COLUMNS,
+        INSPECT_MAX_DISTINCT,
+        INSPECT_MAX_SAMPLE_ROWS,
+        INSPECT_MAX_STRING_LEN,
+    )
+
+    profiled_rows = len(df)
+    all_columns = list(df.columns)
+
+    # Reject overlong headers BEFORE building any sample rows. Names are
+    # identifiers the caller sends back to select roles, so truncating one
+    # would break that mapping — and since every name repeats as a JSON key
+    # in every sample row, a single huge header would amplify the response
+    # far beyond what the row/column caps imply. The message reports a count
+    # only; a column name is dataset-derived and is never echoed.
+    overlong = sum(
+        1 for c in all_columns
+        if isinstance(c, str) and len(c) > INSPECT_MAX_COLUMN_NAME_LEN
+    )
+    if overlong:
+        raise AnalysisValidationError(
+            f"{overlong} column name(s) exceed the maximum supported length "
+            f"({INSPECT_MAX_COLUMN_NAME_LEN} characters)."
+        )
+
+    shown_columns = all_columns[:INSPECT_MAX_COLUMNS]
+
+    sample_df = df.loc[:, shown_columns].head(INSPECT_MAX_SAMPLE_ROWS)
+    # Read cell-by-cell with .at[] rather than iterrows(): iterrows builds a
+    # Series per row, so an all-numeric row is upcast to a single float dtype
+    # and an integer 58 would be reported as 58.0. Column-wise access keeps
+    # each value's own dtype, which is what the type-preservation claim needs.
+    sample_rows = [
+        {
+            col: _safe_cell(sample_df.at[idx, col], INSPECT_MAX_STRING_LEN)
+            for col in shown_columns
+        }
+        for idx in sample_df.index
+    ]
+
+    columns: list[dict] = []
+    for col in shown_columns:
+        series = df[col]
+        coerced = _coerce_numeric(series)
+        values = coerced["values"]
+
+        present = series.dropna()
+        distinct_keys: dict[tuple, int] = {}
+        over_cap = False
+        for cell in present:
+            key = _cell_status_key(cell)
+            if key is None:
+                key = ("__unsupported__",)
+            if key not in distinct_keys:
+                if len(distinct_keys) >= INSPECT_MAX_DISTINCT:
+                    over_cap = True
+                    break
+                distinct_keys[key] = 0
+            distinct_keys[key] += 1
+
+        if over_cap:
+            distinct_count = None
+            distinct_values = None
+        else:
+            distinct_count = len(distinct_keys)
+            distinct_values = [
+                {
+                    "value": _safe_cell(k[1], INSPECT_MAX_STRING_LEN) if k != ("__unsupported__",) else None,
+                    "value_type": k[0] if k != ("__unsupported__",) else "unsupported",
+                }
+                for k in distinct_keys
+            ]
+
+        columns.append({
+            "name": col,
+            "display_type": _display_type(coerced, values, profiled_rows),
+            "missing": coerced["missing_rows"],
+            "missing_percent": (coerced["missing_rows"] / profiled_rows * 100.0) if profiled_rows else 0.0,
+            "non_numeric": coerced["non_numeric_rows"],
+            "distinct_count": distinct_count,
+            "distinct_values": distinct_values,
+            "example_values": [
+                _safe_cell(v, INSPECT_MAX_STRING_LEN) for v in present.head(3).tolist()
+            ],
+        })
+
+    return {
+        "profile": {
+            "profiled_rows": profiled_rows,
+            "profile_scope": "partial" if truncated else "full",
+            "total_rows": None if truncated else profiled_rows,
+        },
+        "column_count": len(all_columns),
+        "columns_returned": len(shown_columns),
+        "columns_truncated": len(all_columns) > len(shown_columns),
+        "sample_rows": sample_rows,
+        "columns": columns,
+    }

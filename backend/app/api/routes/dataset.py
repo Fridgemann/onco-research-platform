@@ -24,12 +24,17 @@ from app.models.workspace import WorkspaceMember, MemberRole
 from app.schemas.dataset import (
     ALLOWED_CONTENT_TYPES,
     ALLOWED_EXTENSIONS,
+    INSPECT_MAX_PARSE_ROWS,
     MAX_FILE_SIZE,
     DatasetDeleteResponse,
+    DatasetInspectResponse,
     DatasetResponse,
 )
 from app.services.audit import write_audit_log
 from app.services import storage
+from app.services.analysis_prep import AnalysisValidationError, profile_dataset
+from app.core.rate_limit import limiter
+from fastapi.concurrency import run_in_threadpool
 
 router = APIRouter(
     prefix="/workspaces/{workspace_id}/datasets",
@@ -285,3 +290,107 @@ async def get_dataset_columns(
         raise HTTPException(status_code=422, detail="Could not parse dataset as CSV.")
 
     return {"columns": columns}
+
+
+async def _audit_inspect(db: AsyncSession, user_id: str, dataset_id: str, status: str) -> None:
+    """Audit a dataset inspection. Detail carries ids only — never cell values.
+
+    Committed here rather than left to request teardown: the failure paths
+    raise an HTTPException, and get_db rolls back on any exception, which
+    would otherwise discard the record of a dataset access that really
+    happened (the same defect found in the KM preflight during M3 QA).
+    """
+    await write_audit_log(
+        db,
+        action=AuditAction.DATASET_INSPECTED,
+        user_id=user_id,
+        resource_type="dataset",
+        resource_id=dataset_id,
+        status=status,
+        detail=f"inspect dataset_id={dataset_id}",
+    )
+    await db.commit()
+
+
+@router.get("/{dataset_id}/inspect", response_model=DatasetInspectResponse)
+@limiter.limit("30/minute")
+async def inspect_dataset(
+    workspace_id: str,
+    dataset_id: str,
+    request: Request,          # required by the rate limiter
+    response: Response,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """Describe a dataset so a researcher can see what they actually uploaded:
+    sample rows, per-column missingness, and a display-type hint.
+
+    Returns real cell values to the authorised workspace member, so the
+    response is uncacheable, rate limited, audited, and bounded server-side:
+    sample rows, described columns, distinct values per column, cell-string
+    length, and rows parsed. Column *names* are deliberately not truncated —
+    they are identifiers the caller sends back to select analysis roles, so
+    shortening one would break that mapping; their number is bounded instead.
+    No cell value ever reaches a log, an audit record, an error message, or
+    the URL — the path carries ids only.
+
+    Figures describe `profile.profiled_rows`. If the file exceeded the parse
+    cap the scope is reported as "partial" and the true row count as null,
+    so a sampled figure is never mistaken for a whole-cohort figure.
+    """
+    await _require_member(workspace_id, current_user.id, db)
+
+    result = await db.execute(
+        select(Dataset).where(
+            Dataset.id == dataset_id,
+            Dataset.workspace_id == workspace_id,
+            Dataset.is_deleted == False,  # noqa: E712
+        )
+    )
+    dataset = result.scalar_one_or_none()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+
+    try:
+        encrypted = await storage.download_object(dataset.object_key)
+    except Exception:
+        # A storage/network failure is not the researcher's data being wrong,
+        # so it is reported as an upstream failure rather than a 422 — but it
+        # is still an attempted access of this dataset and must be audited.
+        logger.error("Dataset inspection could not read dataset %s (sanitized)", dataset_id)
+        await _audit_inspect(db, current_user.id, dataset_id, status="failed")
+        raise HTTPException(status_code=503, detail="Could not read dataset from storage.")
+
+    def _parse_and_profile() -> dict:
+        data = decrypt_bytes(encrypted)
+        # Read one row past the cap so truncation is detected rather than
+        # assumed, without materialising an entire large file for a preview.
+        df = pd.read_csv(
+            io.StringIO(data.decode("utf-8")),
+            index_col=False,
+            nrows=INSPECT_MAX_PARSE_ROWS + 1,
+        )
+        df = df.loc[:, ~df.columns.str.match(r"^Unnamed: \d+$")]
+        truncated = len(df) > INSPECT_MAX_PARSE_ROWS
+        if truncated:
+            df = df.head(INSPECT_MAX_PARSE_ROWS)
+        return profile_dataset(df, truncated=truncated)
+
+    try:
+        profile = await run_in_threadpool(_parse_and_profile)
+    except AnalysisValidationError as exc:
+        # Developer-authored and count-only by construction (no column name or
+        # cell value), so it is safe to show the researcher what to fix.
+        logger.error("Dataset inspection rejected dataset %s (sanitized)", dataset_id)
+        await _audit_inspect(db, current_user.id, dataset_id, status="failed")
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception:
+        # Sanitized: dataset content may appear in pandas' exception text, so
+        # neither the log nor the response repeats it.
+        logger.error("Dataset inspection failed for dataset %s (sanitized)", dataset_id)
+        await _audit_inspect(db, current_user.id, dataset_id, status="failed")
+        raise HTTPException(status_code=422, detail="Could not parse dataset as CSV.")
+
+    await _audit_inspect(db, current_user.id, dataset_id, status="success")
+    response.headers["Cache-Control"] = "no-store"
+    return profile

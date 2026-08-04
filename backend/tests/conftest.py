@@ -69,6 +69,9 @@ def make_db(first_result, second_result=None):
     db = MagicMock()
     db.flush = AsyncMock()
     db.execute = AsyncMock()
+    # Routes that audit on a failure path commit explicitly, because get_db
+    # rolls back when the error propagates. Awaitable so those paths work.
+    db.commit = AsyncMock()
 
     # SQLAlchemy column defaults (created_at, updated_at) only fire during a
     # real flush/INSERT.  Simulate that by setting them when add() is called.

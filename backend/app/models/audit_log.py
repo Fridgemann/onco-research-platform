@@ -28,6 +28,7 @@ class AuditAction(str, PyEnum):
     DATASET_UPLOADED = "dataset_uploaded"
     DATASET_DELETED = "dataset_deleted"
     DATASET_DOWNLOADED = "dataset_downloaded"
+    DATASET_INSPECTED = "dataset_inspected"
     ANALYSIS_STARTED = "analysis_started"
     ANALYSIS_COMPLETED = "analysis_completed"
     ANALYSIS_FAILED = "analysis_failed"
