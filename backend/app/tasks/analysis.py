@@ -45,9 +45,13 @@ from app.services.analysis_prep import (  # noqa: F401
     _normalize_mapping_key,
     _numeric_processing_report,
     _status_value_payload,
+    preflight_analysis,
     prepare_descriptive,
     prepare_logistic,
     prepare_regression,
+    profile_dataset,
+    resolve_class_labels,
+    resolve_positive_class,
 )
 
 import lifelines
@@ -407,18 +411,42 @@ def _run_logistic_regression(df: pd.DataFrame, params: dict) -> dict:
             f"excluding unusable rows; found {n_classes}."
         )
 
+    # Which outcome the model predicts is the researcher's decision. When one
+    # is confirmed, the target is mapped to 0/1 with 1 = that outcome BEFORE
+    # fitting, so probabilities, coefficient directions and AUC all describe
+    # it — rather than sign-flipping afterwards and risking disagreement
+    # between the figures. Revalidated here, so a direct API submit that
+    # skipped preflight cannot select an outcome the data does not contain.
+    confirmed = resolve_positive_class(params, prep["classes"])
+
+    if confirmed is not None:
+        fit_y = np.array([1 if _cell_status_key(v) == confirmed else 0 for v in y])
+        positive_class = {"value": confirmed[1], "value_type": confirmed[0]}
+    else:
+        # No selection: keep sklearn's own ordering, exactly as before, and
+        # record that nothing was confirmed.
+        fit_y = y
+        positive_class = None
+
     model = LogisticRegression(max_iter=1000)
-    model.fit(X, y)
+    model.fit(X, fit_y)
 
     y_pred = model.predict(X)
-    accuracy = float(accuracy_score(y, y_pred))
+    accuracy = float(accuracy_score(fit_y, y_pred))
 
     auc = None
     try:
         if len(model.classes_) == 2:
-            auc = float(roc_auc_score(y, model.predict_proba(X)[:, 1]))
+            auc = float(roc_auc_score(fit_y, model.predict_proba(X)[:, 1]))
     except Exception:
         pass
+
+    if positive_class is None and len(model.classes_) == 2:
+        # Disclose the class sklearn treated as positive, so the direction of
+        # every figure is stated even when nothing was explicitly chosen.
+        fallback = _cell_status_key(model.classes_[1])
+        if fallback is not None:
+            positive_class = {"value": fallback[1], "value_type": fallback[0]}
 
     return {
         "type": "logistic",
@@ -429,7 +457,21 @@ def _run_logistic_regression(df: pd.DataFrame, params: dict) -> dict:
         "accuracy": accuracy,
         "auc": auc,
         "n": len(y),
-        "classes": model.classes_.tolist(),
+        # The original outcome labels, independent of how the fit was oriented.
+        # For a confirmed run these come from the already-typed prep classes:
+        # the model was fitted on a 0/1 mapping so its own classes_ would say
+        # 0/1, and np.unique would raise TypeError on deliberately distinct
+        # mixed types (numeric 1 vs string "1"). The unconfirmed compatibility
+        # path keeps model.classes_ exactly as before.
+        "classes": (
+            [c["value"] for c in prep["classes"]]
+            if confirmed is not None
+            else model.classes_.tolist()
+        ),
+        "target_classes": prep["classes"],
+        "positive_class": positive_class,
+        "positive_class_confirmed": confirmed is not None,
+        "class_labels": resolve_class_labels(params, prep["classes"]),
         "processing": processing,
         "_meta": meta,
     }

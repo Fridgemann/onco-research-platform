@@ -892,3 +892,168 @@ def profile_dataset(df: pd.DataFrame, *, truncated: bool) -> dict:
         "sample_rows": sample_rows,
         "columns": columns,
     }
+
+
+# ── Outcome (positive class) selection for logistic regression ──────────────
+#
+# Which outcome the model predicts is a clinical decision, not a library
+# detail. sklearn would silently treat classes_[1] as positive; here the
+# researcher chooses, the backend revalidates the choice against the two
+# usable classes, and every downstream figure is oriented to it.
+
+
+def resolve_positive_class(params: dict, classes: list[dict]) -> tuple | None:
+    """Validate a submitted outcome selection against the usable classes.
+
+    Returns the normalized (value_type, value) key, or None when nothing was
+    submitted. Raises when the selection is malformed or is not one of the
+    classes actually present after filtering — a direct API caller must not
+    be able to smuggle in an outcome the data does not contain.
+    """
+    selection = params.get("positive_class")
+    if selection is None:
+        return None
+    if not isinstance(selection, dict):
+        raise AnalysisValidationError("The selected outcome must specify a value and value_type.")
+
+    key = _normalize_mapping_key(selection.get("value"), selection.get("value_type"))
+    usable = {(c["value_type"], c["value"]) for c in classes}
+    if key not in usable:
+        raise AnalysisValidationError(
+            "The selected outcome is not one of the usable outcome classes in this column."
+        )
+    return key
+
+
+def _class_key_payload(key: tuple) -> dict:
+    return {"value": key[1], "value_type": key[0]}
+
+
+_CLASS_LABEL_MAX_LEN = 64
+
+
+def resolve_class_labels(params: dict, classes: list[dict]) -> list[dict]:
+    """Validate optional human-readable labels for the outcome classes.
+
+    Labels are display metadata only — they never change the fit. They are
+    still validated rather than echoed blindly: a label attached to a class
+    that does not exist in the data would put a wrong word next to a real
+    number in the result.
+    """
+    # Only an absent key (or explicit null) means "no labels". `or []` would
+    # quietly swallow {}, "" and 0 as if nothing had been sent, so every
+    # provided non-list value is rejected instead.
+    labels = params.get("class_labels")
+    if labels is None:
+        return []
+    if not isinstance(labels, list):
+        raise AnalysisValidationError("Class labels must be a list of typed entries.")
+
+    usable = {(c["value_type"], c["value"]) for c in classes}
+    resolved: list[dict] = []
+    seen: set[tuple] = set()
+
+    for entry in labels:
+        if not isinstance(entry, dict):
+            raise AnalysisValidationError("Each class label must specify value, value_type and label.")
+        key = _normalize_mapping_key(entry.get("value"), entry.get("value_type"))
+        if key not in usable:
+            raise AnalysisValidationError(
+                "A class label refers to an outcome that is not present in this column."
+            )
+        if key in seen:
+            raise AnalysisValidationError("Duplicate class label for the same outcome.")
+        seen.add(key)
+
+        text = entry.get("label")
+        if not isinstance(text, str) or not text.strip():
+            raise AnalysisValidationError("Each class label must include non-empty text.")
+        if len(text) > _CLASS_LABEL_MAX_LEN:
+            raise AnalysisValidationError(
+                f"A class label exceeds the maximum length ({_CLASS_LABEL_MAX_LEN} characters)."
+            )
+
+        resolved.append({"value": key[1], "value_type": key[0], "label": text})
+
+    return resolved
+
+
+def _preflight_columns(processing: dict) -> list[dict]:
+    """Per-column processing detail, flattened for the preflight UI."""
+    return [
+        {
+            "name": name,
+            "role": report.get("role"),
+            "missing": report.get("missing", 0),
+            "non_numeric": report.get("non_numeric", 0),
+            "normalized": report.get("normalized", 0),
+        }
+        for name, report in processing.items()
+    ]
+
+
+def preflight_analysis(df: pd.DataFrame, job_type: str, params: dict) -> dict:
+    """Report what an analysis would do, without running it.
+
+    Uses the same `prepare_*` helpers the Celery run uses, so the counts shown
+    before submission are the counts the analysis will actually use. `ready`
+    is advisory only — the run re-validates everything regardless.
+    """
+    if job_type == "descriptive_stats":
+        prep = prepare_descriptive(df, params)
+        return {
+            "job_type": job_type,
+            "ready": prep["ready"],
+            "blockers": prep["blockers"],
+            # Descriptive computes each column on its own usable rows, so a
+            # joint used/excluded pair is deliberately not reported here.
+            "counts_by_column": prep["counts_by_column"],
+            "columns": [
+                {"name": c, "role": "column", **prep["counts_by_column"][c]}
+                for c in prep["columns"]
+            ],
+        }
+
+    if job_type == "regression":
+        prep = prepare_regression(df, params)
+        return {
+            "job_type": job_type,
+            "ready": prep["ready"],
+            "blockers": prep["blockers"],
+            "counts": prep["counts"],
+            "columns": _preflight_columns(prep["processing"]),
+        }
+
+    if job_type == "logistic_regression":
+        prep = prepare_logistic(df, params)
+        blockers = list(prep["blockers"])
+
+        # Validate any submitted selection even when the target is unusable,
+        # so a bad selection is reported rather than masked by another blocker.
+        confirmed = resolve_positive_class(params, prep["classes"])
+        if confirmed is None and "target_not_binary" not in blockers:
+            blockers.append("positive_class_unconfirmed")
+
+        # Validate labels through the SAME helper the run uses. Without this,
+        # preflight would report ready=true for labels the run then rejects,
+        # breaking the preflight/run agreement this endpoint exists to provide.
+        resolve_class_labels(params, prep["classes"])
+
+        return {
+            "job_type": job_type,
+            "ready": not blockers,
+            "blockers": blockers,
+            "counts": prep["counts"],
+            "columns": _preflight_columns(prep["processing"]),
+            "target_classes": prep["classes"],
+            "suggested_positive_class": prep["suggested_positive_class"],
+            "positive_class": _class_key_payload(confirmed) if confirmed else None,
+        }
+
+    if job_type == "kaplan_meier":
+        raise AnalysisValidationError(
+            "Kaplan-Meier preflight uses its own endpoint, which also resolves "
+            "event and censoring mapping."
+        )
+
+    raise AnalysisValidationError("Unsupported analysis type for preflight.")

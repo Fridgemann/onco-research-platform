@@ -42,6 +42,29 @@ class KMPreflightRequest(BaseModel):
     all_events_confirmed: bool = False
 
 
+class AnalysisPreflightRequest(BaseModel):
+    """Preflight for the non-KM analyses. Kaplan-Meier keeps its own endpoint,
+    which also resolves event/censoring mapping."""
+    job_type: str = Field(max_length=64)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class AnalysisPreflightResponse(BaseModel):
+    job_type: str
+    ready: bool
+    blockers: list[str]
+    # Linear/logistic report joint-row counts; descriptive reports per-column
+    # counts, because it computes each column on its own usable rows.
+    counts: Optional[dict[str, Any]] = None
+    counts_by_column: Optional[dict[str, Any]] = None
+    columns: list[dict[str, Any]] = Field(default_factory=list)
+    # Logistic only: the usable outcome classes, a suggestion that is never
+    # auto-applied, and the selection if one was submitted.
+    target_classes: Optional[list[dict[str, Any]]] = None
+    suggested_positive_class: Optional[dict[str, Any]] = None
+    positive_class: Optional[dict[str, Any]] = None
+
+
 class KMStatusValue(BaseModel):
     value: Union[bool, int, float, str, None] = None
     value_type: str

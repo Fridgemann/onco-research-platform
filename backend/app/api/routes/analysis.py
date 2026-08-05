@@ -14,17 +14,23 @@ from app.models.audit_log import AuditAction
 from app.core.database import get_db
 from app.core.rate_limit import limiter
 from app.core.security import decrypt_bytes
-from app.models.analysis_job import AnalysisJob
+from app.models.analysis_job import AnalysisJob, JobType
 from app.models.dataset import Dataset, DatasetStatus
 from app.models.workspace import WorkspaceMember
 from app.schemas.analysis import (
     AnalysisJobCreate,
     AnalysisJobResponse,
+    AnalysisPreflightRequest,
+    AnalysisPreflightResponse,
     KMPreflightRequest,
     KMPreflightResponse,
 )
 from app.services import storage
-from app.services.analysis_prep import AnalysisValidationError, _km_preflight
+from app.services.analysis_prep import (
+    AnalysisValidationError,
+    _km_preflight,
+    preflight_analysis,
+)
 from app.services.audit import write_audit_log
 from app.tasks.analysis import run_analysis_task
 
@@ -88,6 +94,27 @@ async def submit_analysis_job(
     db: AsyncSession = Depends(get_db),
 ):
     dataset = await _get_dataset_or_404(workspace_id, dataset_id, current_user.id, db)
+
+    # Which outcome a logistic model predicts must be chosen, never inherited
+    # from sklearn's class ordering. The worker keeps a compatibility fallback
+    # for legacy/direct calls, so without this gate a client could simply omit
+    # the selection and still get a silently-oriented model. Structural check
+    # only — the worker revalidates the selection against the classes actually
+    # present in the data, which needs the dataset.
+    if body.job_type == JobType.LOGISTIC_REGRESSION:
+        selection = (body.parameters or {}).get("positive_class")
+        if (
+            not isinstance(selection, dict)
+            or "value" not in selection
+            or not selection.get("value_type")
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Logistic regression requires an explicit outcome selection: "
+                    "send positive_class as {value, value_type}."
+                ),
+            )
 
     job = AnalysisJob(
         dataset_id=dataset.id,
@@ -166,8 +193,9 @@ async def km_preflight(
     return result
 
 
-async def _audit_preflight(db, user_id: str, dataset_id: str, status: str) -> None:
-    """Audit a KM preflight data-access. Detail carries no status cell values.
+async def _audit_preflight(db, user_id: str, dataset_id: str, status: str,
+                           kind: str = "km_preflight") -> None:
+    """Audit a preflight data-access. Detail carries ids only — never cell values.
 
     Committed here rather than left to the request teardown: on the failure
     paths this is followed by an HTTPException, and get_db rolls back on any
@@ -181,7 +209,7 @@ async def _audit_preflight(db, user_id: str, dataset_id: str, status: str) -> No
         resource_type="dataset",
         resource_id=dataset_id,
         status=status,
-        detail=f"km_preflight dataset_id={dataset_id}",
+        detail=f"{kind} dataset_id={dataset_id}",
     )
     await db.commit()
 
@@ -232,3 +260,61 @@ async def list_analysis_jobs(
     ).all()
 
     return [_job_to_response(j) for j in jobs]
+
+
+@router.post("/preflight", response_model=AnalysisPreflightResponse)
+@limiter.limit("30/minute")
+async def analysis_preflight(
+    workspace_id: str,
+    dataset_id: str,
+    body: AnalysisPreflightRequest,
+    request: Request,          # required by the rate limiter
+    response: Response,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """Report what a descriptive / linear / logistic analysis would do,
+    without running it: which rows it would use, which it would exclude and
+    why, and — for logistic — the two usable outcome classes.
+
+    Counts come from the same `prepare_*` helpers the Celery run uses, so the
+    figures shown before submission are the figures the analysis will
+    actually use. `ready` is advisory UX only; the run re-validates
+    everything, so a client that skips preflight cannot bypass validation.
+
+    Kaplan-Meier has its own endpoint, which additionally resolves event and
+    censoring mapping.
+    """
+    dataset = await _get_dataset_or_404(workspace_id, dataset_id, current_user.id, db)
+
+    try:
+        raw = await storage.download_object(dataset.object_key)
+    except Exception:
+        logger.error("Analysis preflight could not read dataset %s (sanitized)", dataset_id)
+        await _audit_preflight(db, current_user.id, dataset_id, status="failed", kind="analysis_preflight")
+        raise HTTPException(status_code=503, detail="Could not read dataset from storage.")
+
+    def _parse_and_preflight():
+        data = decrypt_bytes(raw)
+        df = pd.read_csv(io.StringIO(data.decode("utf-8")), index_col=False)
+        df = df.loc[:, ~df.columns.str.match(r"^Unnamed: \d+$")]
+        return preflight_analysis(df, body.job_type, body.parameters)
+
+    try:
+        result = await run_in_threadpool(_parse_and_preflight)
+    except AnalysisValidationError as exc:
+        # Developer-authored and value-free by construction — safe to surface.
+        await _audit_preflight(
+            db, current_user.id, dataset_id, status="failed", kind="analysis_preflight"
+        )
+        raise HTTPException(status_code=422, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Analysis preflight failed for dataset %s (sanitized)", dataset_id)
+        await _audit_preflight(db, current_user.id, dataset_id, status="failed", kind="analysis_preflight")
+        raise HTTPException(status_code=422, detail="Could not process dataset for preflight.")
+
+    await _audit_preflight(db, current_user.id, dataset_id, status="success", kind="analysis_preflight")
+    response.headers["Cache-Control"] = "no-store"
+    return result
