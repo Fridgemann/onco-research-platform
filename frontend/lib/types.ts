@@ -189,3 +189,44 @@ export interface KMResultData {
   reproducibility: KMReproducibility
   assumptions: string[]
 }
+
+// ── Dataset inspection (Milestone 4) ────────────────────────────────────────
+
+export type DatasetDisplayType = 'numeric' | 'categorical' | 'binary' | 'empty'
+
+/** How much of the file the figures describe. `total_rows` is null when the
+ *  file exceeded the parse cap — unknown, deliberately not estimated. */
+export interface DatasetProfileScope {
+  profiled_rows: number
+  profile_scope: 'full' | 'partial'
+  total_rows: number | null
+}
+
+export interface DatasetTypedValue {
+  value: boolean | number | string | null
+  value_type: string
+}
+
+export interface DatasetColumnProfile {
+  name: string
+  display_type: DatasetDisplayType
+  /** Counts below are over profile.profiled_rows, not the whole file. */
+  missing: number
+  missing_percent: number
+  non_numeric: number
+  distinct_count: number | null      // null when above the cap
+  distinct_values: DatasetTypedValue[] | null
+  example_values: (boolean | number | string | null)[]
+}
+
+export interface DatasetInspect {
+  profile: DatasetProfileScope
+  column_count: number               // true width of the file
+  /** Every column name. Detailed profiles are capped; this list is not, so
+   *  no usable column is ever hidden from the role dropdowns. */
+  column_names: string[]
+  columns_returned: number           // how many are profiled below
+  columns_truncated: boolean
+  sample_rows: Record<string, boolean | number | string | null>[]
+  columns: DatasetColumnProfile[]
+}

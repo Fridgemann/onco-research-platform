@@ -2,7 +2,6 @@ import hashlib
 import io
 import logging
 import os
-import re
 import urllib.parse
 import uuid
 from datetime import datetime, timezone
@@ -108,7 +107,9 @@ async def upload_dataset(
             detail=f"File too large. Maximum allowed size is {MAX_FILE_SIZE // (1024 * 1024)} MB.",
         )
 
-    # Magic bytes check for xlsx
+    # Content sniffing for xlsx. Unreachable while ALLOWED_EXTENSIONS is CSV
+    # only; kept so that widening the allow-list again cannot silently drop
+    # the check.
     if ext == ".xlsx" and not data[:4] == b"PK\x03\x04":
         raise HTTPException(status_code=400, detail="File does not appear to be a valid .xlsx file.")
 
@@ -259,37 +260,10 @@ async def delete_dataset(
     return DatasetDeleteResponse(message="Dataset deleted successfully.")
 
 
-@router.get("/{dataset_id}/columns")
-async def get_dataset_columns(
-    workspace_id: str,
-    dataset_id: str,
-    current_user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
-):
-    await _require_member(workspace_id, current_user.id, db)
-
-    result = await db.execute(
-        select(Dataset).where(
-            Dataset.id == dataset_id,
-            Dataset.workspace_id == workspace_id,
-            Dataset.is_deleted == False,  # noqa: E712
-        )
-    )
-    dataset = result.scalar_one_or_none()
-    if not dataset:
-        raise HTTPException(status_code=404, detail="Dataset not found.")
-
-    encrypted_data = await storage.download_object(dataset.object_key)
-    data = decrypt_bytes(encrypted_data)
-
-    try:
-        df = pd.read_csv(io.StringIO(data.decode("utf-8")), nrows=0, index_col=False)
-        columns = [c for c in df.columns if not re.match(r"^Unnamed: \d+$", c)]
-    except Exception:
-        logger.exception("Failed to parse CSV columns for dataset %s", dataset_id)
-        raise HTTPException(status_code=422, detail="Could not parse dataset as CSV.")
-
-    return {"columns": columns}
+# GET /{dataset_id}/columns was removed once the frontend migrated to
+# /inspect. It decrypted the dataset and returned column names with no audit
+# record, no Cache-Control, and parsing on the event loop; /inspect returns a
+# superset of what it offered under those controls.
 
 
 async def _audit_inspect(db: AsyncSession, user_id: str, dataset_id: str, status: str) -> None:

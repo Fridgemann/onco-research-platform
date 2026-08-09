@@ -3,7 +3,11 @@ from typing import Any, Optional, Union
 
 from pydantic import BaseModel
 
-ALLOWED_EXTENSIONS = {".csv", ".tsv", ".json", ".xlsx"}
+# CSV only for the pilot. Every read path — inspect, preflight, and each
+# analysis — parses with pd.read_csv, so accepting .tsv/.json/.xlsx produced a
+# successful upload followed by a 422 on every analysis of that dataset.
+# Rejecting them at upload tells the researcher immediately instead.
+ALLOWED_EXTENSIONS = {".csv"}
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 
 # ── Dataset inspection caps (Milestone 4) ───────────────────────────────────
@@ -24,6 +28,15 @@ INSPECT_MAX_PARSE_ROWS = 50_000
 # repeated as a JSON key in every sample row, so one huge header would
 # amplify into a far larger response than the row cap suggests.
 INSPECT_MAX_COLUMN_NAME_LEN = 256
+
+# Detailed profiling stops at INSPECT_MAX_COLUMNS, but every column name is
+# still returned: after /columns is removed, inspect is the only source of the
+# names the role dropdowns offer, and a column that is silently missing from
+# that list is a column the researcher can no longer analyse. Names are cheap
+# (bounded by INSPECT_MAX_COLUMN_NAME_LEN each); profiles are not. The total
+# width is capped separately, and a wider file is rejected with a stated
+# limit rather than served with an unusable partial list.
+INSPECT_MAX_TOTAL_COLUMNS = 1000
 
 ALLOWED_CONTENT_TYPES: dict[str, set[str]] = {
     ".csv": {"text/csv", "application/vnd.ms-excel", "application/csv", "text/plain"},
@@ -85,7 +98,8 @@ class DatasetColumnProfile(BaseModel):
 class DatasetInspectResponse(BaseModel):
     profile: DatasetProfileScope
     column_count: int           # true width of the file
-    columns_returned: int       # how many are described below
+    column_names: list[str]     # every column, so all stay selectable
+    columns_returned: int       # how many are profiled below
     columns_truncated: bool
     sample_rows: list[dict[str, Any]]
     columns: list[DatasetColumnProfile]

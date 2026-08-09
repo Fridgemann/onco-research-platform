@@ -1,14 +1,19 @@
 'use client'
 
-import { useEffect, useState, use, useRef } from 'react'
+import { useCallback, useEffect, useState, use, useRef } from 'react'
 import Link from 'next/link'
 import { apiFetch, ApiError } from '@/lib/api'
 import { getToken } from '@/lib/auth'
 import { useUser } from '@/lib/user-context'
 import type {
   Dataset, AnalysisJob, Workspace, WorkspaceInvite, WorkspaceMember, KMPreflightResponse,
+  DatasetInspect,
 } from '@/lib/types'
 import ResultPanel from '@/components/analysis/ResultPanel'
+import DatasetInspector from '@/components/analysis/DatasetInspector'
+import {
+  fetchDatasetInspect, checkUploadFile, UPLOAD_ACCEPT, UPLOAD_MAX_LABEL,
+} from '@/lib/datasets'
 import KMConfigForm, {
   EMPTY_KM_CONFIG, kmConfigToParams, type KMConfig,
 } from '@/components/analysis/KMConfigForm'
@@ -104,8 +109,13 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
 
   // Dataset selection (top bar)
   const [selectedDatasetId, setSelectedDatasetId] = useState('')
-  const [datasetColumns, setDatasetColumns] = useState<string[]>([])
+  const [inspect, setInspect] = useState<DatasetInspect | null>(null)
+  const [inspectError, setInspectError] = useState<string | null>(null)
   const [columnsLoading, setColumnsLoading] = useState(false)
+  // Column names still drive the role dropdowns; they now come from the
+  // inspect payload rather than a separate unaudited endpoint.
+  const inspectAbortRef = useRef<AbortController | null>(null)
+
   const [deletingDataset, setDeletingDataset] = useState<string | null>(null)
   const [confirmDeleteDs, setConfirmDeleteDs] = useState<string | null>(null)
 
@@ -181,14 +191,54 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
     setRightJobId(null)
   }, [selectedDatasetId])
 
-  useEffect(() => {
+  const loadInspect = useCallback(() => {
     if (!selectedDatasetId) return
+
+    // One inspection in flight at a time. Switching datasets quickly would
+    // otherwise let a slow response for the previous dataset land last and
+    // display dataset A's rows while dataset B is selected. Aborting first
+    // and then ignoring every settlement of an aborted controller means only
+    // the current selection can touch inspect / error / loading state.
+    inspectAbortRef.current?.abort()
+    const controller = new AbortController()
+    inspectAbortRef.current = controller
+
     setColumnsLoading(true)
-    apiFetch<{ columns: string[] }>(`/api/workspaces/${id}/datasets/${selectedDatasetId}/columns`)
-      .then((data) => setDatasetColumns(data.columns))
-      .catch(() => setDatasetColumns([]))
-      .finally(() => setColumnsLoading(false))
-  }, [selectedDatasetId, id])
+    setInspectError(null)
+    fetchDatasetInspect(id, selectedDatasetId, controller.signal)
+      .then((data) => {
+        if (controller.signal.aborted) return
+        setInspect(data)
+      })
+      .catch((err) => {
+        // A superseded request is not a failure — say nothing about it.
+        if (controller.signal.aborted) return
+        // Previously this failed silently: no columns appeared and no reason
+        // was given. A dataset that cannot be read is worth saying out loud.
+        setInspect(null)
+        setInspectError(
+          err instanceof ApiError
+            ? err.message
+            : 'Could not read this dataset.',
+        )
+      })
+      .finally(() => {
+        // The request that replaced this one owns the loading state now.
+        if (controller.signal.aborted) return
+        setColumnsLoading(false)
+      })
+  }, [id, selectedDatasetId])
+
+  useEffect(() => {
+    setInspect(null)
+    loadInspect()
+    return () => inspectAbortRef.current?.abort()
+  }, [loadInspect])
+
+  // Role dropdowns need plain names. Use column_names, not the profiled
+  // subset: detailed profiles are capped at 200 columns, so deriving the
+  // dropdown list from them would make every later column unselectable.
+  const datasetColumns = inspect ? inspect.column_names : []
 
   // Analyses run asynchronously on Celery, so a submitted job stays "pending"
   // until something refetches it. Poll only the jobs that are still running,
@@ -269,6 +319,14 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
   async function handleUpload(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault()
     if (!uploadFile) return
+    // Re-check at submit: the picker's check can be bypassed by dropping a
+    // file or by changing it after selection. The backend is still the
+    // authority — this only avoids a pointless round trip.
+    const problem = checkUploadFile(uploadFile)
+    if (problem) {
+      setUploadError(problem)
+      return
+    }
     setUploading(true)
     setUploadError(null)
     try {
@@ -287,7 +345,19 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
       )
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
-        throw new Error(body.detail ?? `HTTP ${res.status}`)
+        // `HTTP 413` tells a clinician nothing. Say what happened and what to
+        // do about it; fall back to the server's own message when it has one.
+        if (res.status === 413) {
+          throw new Error(`This file exceeds the ${UPLOAD_MAX_LABEL} limit.`)
+        }
+        if (res.status === 401 || res.status === 403) {
+          throw new Error('You are not allowed to upload to this workspace.')
+        }
+        throw new Error(
+          typeof body.detail === 'string'
+            ? body.detail
+            : 'Upload failed. Check the file and try again.',
+        )
       }
       const ds = await res.json() as Dataset
       setDatasets((prev) => [ds, ...prev])
@@ -613,8 +683,19 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
 
         {/* Right: config + results */}
         <main style={{ flex: 1, overflowY: 'auto', padding: '28px 32px' }}>
+          {/* Data first, analysis second: the researcher sees what they
+              uploaded before being asked what any column means. */}
+          {selectedDatasetId && (
+            <DatasetInspector
+              inspect={inspect}
+              loading={columnsLoading}
+              error={inspectError}
+              onRetry={loadInspect}
+            />
+          )}
+
           {!selectedTest ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', flexDirection: 'column', gap: '10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '48px 0', flexDirection: 'column', gap: '10px' }}>
               <p className="display" style={{ fontSize: '20px', color: 'var(--text-secondary)' }}>
                 Select an analysis type
               </p>
@@ -640,41 +721,6 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
                   {JOB_TYPE_DESCRIPTIONS[selectedTest]}
                 </p>
               </div>
-
-              {/* Column chips */}
-              {columnsLoading ? (
-                <div className="skeleton" style={{ height: '28px', marginBottom: '20px' }} />
-              ) : datasetColumns.length > 0 && (
-                <div style={{ marginBottom: '20px' }}>
-                  <p style={{
-                    fontSize: '10px',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.06em',
-                    color: 'var(--text-secondary)',
-                    marginBottom: '6px',
-                  }}>
-                    Columns in {selectedDataset?.filename}
-                  </p>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                    {datasetColumns.map((col) => (
-                      <span
-                        key={col}
-                        style={{
-                          fontSize: '11px',
-                          fontFamily: 'var(--font-mono)',
-                          background: 'var(--bg-raised)',
-                          border: '1px solid var(--border)',
-                          borderRadius: '3px',
-                          padding: '2px 7px',
-                          color: 'var(--text-secondary)',
-                        }}
-                      >
-                        {col}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
 
               {/* Config form */}
               <form
@@ -834,11 +880,21 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
 
       {/* Upload modal */}
       {showUpload && (
-        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowUpload(false)}>
+        <div
+          className="modal-overlay"
+          onClick={(e) => {
+            // Closing mid-upload would leave the request running with nothing
+            // reporting its outcome.
+            if (e.target === e.currentTarget && !uploading) setShowUpload(false)
+          }}
+        >
           <div className="modal">
             <p className="modal-title">Upload dataset</p>
+            {/* Format and limit stated before the file picker opens, not
+                discovered from a rejection afterwards. */}
             <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-              CSV or Excel files. All data is encrypted at rest.
+              CSV files only, up to {UPLOAD_MAX_LABEL}. The first row must contain
+              column names. All data is encrypted at rest.
             </p>
             <hr className="modal-divider" />
             <form onSubmit={handleUpload} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -848,8 +904,16 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
                   ref={fileInputRef}
                   type="file"
                   required
-                  accept=".csv,.xlsx,.xls"
-                  onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
+                  accept={UPLOAD_ACCEPT}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] ?? null
+                    // Reject an unusable file at selection time. The backend
+                    // enforces the same rules — this only saves the researcher
+                    // a failed upload.
+                    const problem = file ? checkUploadFile(file) : null
+                    setUploadError(problem)
+                    setUploadFile(problem ? null : file)
+                  }}
                   style={{ display: 'none' }}
                 />
                 <div style={{
@@ -877,7 +941,7 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
                     whiteSpace: 'nowrap',
                     opacity: uploadFile ? 1 : 0.5,
                   }}>
-                    {uploadFile ? uploadFile.name : 'No file chosen — .csv, .xlsx, .xls'}
+                    {uploadFile ? uploadFile.name : `No file chosen — .csv, up to ${UPLOAD_MAX_LABEL}`}
                   </span>
                 </div>
               </div>
@@ -895,8 +959,24 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
                 />
               </div>
               {uploadError && <div className="alert-error">{uploadError}</div>}
+              {/* Encryption and storage happen before the response, so a large
+                  file can sit here for a while. Say so instead of leaving a
+                  spinner to be read as a hang. */}
+              {uploading && (
+                <p style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                  Encrypting and storing your file. This can take a moment for large
+                  files — keep this window open.
+                </p>
+              )}
               <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
-                <button type="button" className="btn btn-outline" onClick={() => setShowUpload(false)}>Cancel</button>
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  disabled={uploading}
+                  onClick={() => setShowUpload(false)}
+                >
+                  Cancel
+                </button>
                 <button type="submit" disabled={uploading || !uploadFile} className="btn btn-primary">
                   {uploading ? <><span className="spinner" /> Uploading…</> : 'Upload'}
                 </button>

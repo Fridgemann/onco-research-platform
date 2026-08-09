@@ -247,17 +247,35 @@ class TestA04_FileValidation:
             )
         assert resp.status_code == 400
 
-    async def test_xlsx_correct_magic_bytes_accepted(self):
-        """A file starting with PK\\x03\\x04 passes the magic bytes check."""
+    @pytest.mark.parametrize("filename,content_type", [
+        ("data.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        ("data.tsv", "text/tab-separated-values"),
+        ("data.json", "application/json"),
+    ])
+    async def test_non_csv_uploads_rejected(self, filename, content_type):
+        """Milestone 4: CSV only.
+
+        Every read path parses with pd.read_csv, so these formats previously
+        uploaded successfully and then failed on every analysis of the
+        dataset. Rejecting at upload tells the researcher immediately. A
+        well-formed .xlsx (correct PK magic bytes) is rejected too — the
+        extension gate now runs first.
+        """
         member = make_member()
         db = make_db(_execute_result(scalar=member))
-        valid_xlsx = b"PK\x03\x04" + b"\x00" * 100
+        payload = b"PK\x03\x04" + b"\x00" * 100 if filename.endswith(".xlsx") else b"a\tb\n1\t2"
         with patch("app.services.storage.upload_object", new_callable=AsyncMock):
             async with authed_client(db) as ac:
-                resp = await self._upload(
-                    ac, "data.xlsx", valid_xlsx,
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+                resp = await self._upload(ac, filename, payload, content_type)
+        assert resp.status_code == 400
+        assert ".csv" in resp.json()["detail"]
+
+    async def test_csv_upload_still_accepted(self):
+        member = make_member()
+        db = make_db(_execute_result(scalar=member))
+        with patch("app.services.storage.upload_object", new_callable=AsyncMock):
+            async with authed_client(db) as ac:
+                resp = await self._upload(ac, "data.csv", b"a,b\n1,2", "text/csv")
         assert resp.status_code == 201
 
     async def test_file_over_limit_rejected(self):

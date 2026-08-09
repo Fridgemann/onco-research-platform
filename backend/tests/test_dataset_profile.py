@@ -21,6 +21,7 @@ from app.schemas.dataset import (
     INSPECT_MAX_DISTINCT,
     INSPECT_MAX_SAMPLE_ROWS,
     INSPECT_MAX_STRING_LEN,
+    INSPECT_MAX_TOTAL_COLUMNS,
 )
 
 
@@ -105,11 +106,57 @@ def test_wide_dataset_truncates_columns_explicitly():
     # sample rows must not smuggle in the columns we said we dropped
     assert all(len(row) <= INSPECT_MAX_COLUMNS for row in p["sample_rows"])
 
+    # ...but every name is still returned. The profile cap bounds response
+    # size; it must not bound what the researcher can select, or the columns
+    # past the cap would become silently impossible to analyse.
+    assert p["column_names"] == list(wide.keys())
+    assert len(p["column_names"]) == INSPECT_MAX_COLUMNS + 25
+
 
 def test_narrow_dataset_is_not_marked_truncated():
     p = profile_dataset(pd.DataFrame({"a": [1], "b": [2]}), truncated=False)
     assert p["columns_truncated"] is False
     assert p["column_count"] == p["columns_returned"] == 2
+    assert p["column_names"] == ["a", "b"]
+
+
+def test_dataset_wider_than_the_total_cap_is_rejected_with_the_limit():
+    # Beyond this width the name list itself would be the response's bulk, so
+    # the file is refused outright rather than served with a subset of
+    # selectable columns.
+    too_wide = {f"c{i}": [1] for i in range(INSPECT_MAX_TOTAL_COLUMNS + 1)}
+    with pytest.raises(AnalysisValidationError) as exc:
+        profile_dataset(pd.DataFrame(too_wide), truncated=False)
+
+    message = str(exc.value)
+    assert str(INSPECT_MAX_TOTAL_COLUMNS) in message      # states the limit
+    assert "c0" not in message                            # never echoes a name
+
+
+def test_file_with_no_readable_columns_is_rejected():
+    # Found in live QA: a non-delimited file parses into an empty frame, and
+    # "0 rows · 0 columns" left the researcher with empty dropdowns and no
+    # stated reason. It is refused with an explanation instead.
+    with pytest.raises(AnalysisValidationError) as exc:
+        profile_dataset(pd.DataFrame(), truncated=False)
+    assert "no columns" in str(exc.value).lower()
+
+
+def test_header_only_file_is_profiled_and_reports_zero_rows():
+    # Columns exist, so this is a readable table — just an empty one. It is
+    # reported honestly rather than rejected, and the UI names the problem.
+    p = profile_dataset(pd.DataFrame({"Age": [], "Arm": []}), truncated=False)
+    assert p["profile"]["profiled_rows"] == 0
+    assert p["profile"]["total_rows"] == 0
+    assert p["column_names"] == ["Age", "Arm"]
+    assert p["sample_rows"] == []
+    assert _col(p, "Age")["missing_percent"] == 0.0     # no division by zero
+
+
+def test_dataset_at_the_total_column_cap_is_accepted():
+    at_cap = {f"c{i}": [1] for i in range(INSPECT_MAX_TOTAL_COLUMNS)}
+    p = profile_dataset(pd.DataFrame(at_cap), truncated=False)
+    assert len(p["column_names"]) == INSPECT_MAX_TOTAL_COLUMNS
 
 
 def test_distinct_values_capped_and_count_null_when_over_cap():

@@ -798,10 +798,33 @@ def profile_dataset(df: pd.DataFrame, *, truncated: bool) -> dict:
         INSPECT_MAX_DISTINCT,
         INSPECT_MAX_SAMPLE_ROWS,
         INSPECT_MAX_STRING_LEN,
+        INSPECT_MAX_TOTAL_COLUMNS,
     )
 
     profiled_rows = len(df)
     all_columns = list(df.columns)
+
+    # A file pandas accepts but that yields no columns is not a table — a
+    # binary or non-delimited file reaches here as an empty frame. Returning
+    # "0 rows · 0 columns" would be literally true and practically useless:
+    # the researcher would face empty dropdowns with no stated reason.
+    if not all_columns:
+        raise AnalysisValidationError(
+            "No columns could be read from this file. It must be a CSV whose "
+            "first row contains column names."
+        )
+
+    # Detailed profiles stop at INSPECT_MAX_COLUMNS, but the name list below
+    # is complete: it is what the role dropdowns offer, so a name missing from
+    # it is a column that can no longer be analysed at all. Rather than serve
+    # a silently unusable subset for an extremely wide file, refuse it and say
+    # the limit. Count only — a column name is dataset-derived, never echoed.
+    if len(all_columns) > INSPECT_MAX_TOTAL_COLUMNS:
+        raise AnalysisValidationError(
+            f"This dataset has {len(all_columns)} columns; this platform supports "
+            f"up to {INSPECT_MAX_TOTAL_COLUMNS}. Split the file or remove unused "
+            f"columns before uploading."
+        )
 
     # Reject overlong headers BEFORE building any sample rows. Names are
     # identifiers the caller sends back to select roles, so truncating one
@@ -887,6 +910,7 @@ def profile_dataset(df: pd.DataFrame, *, truncated: bool) -> dict:
             "total_rows": None if truncated else profiled_rows,
         },
         "column_count": len(all_columns),
+        "column_names": [str(c) for c in all_columns],
         "columns_returned": len(shown_columns),
         "columns_truncated": len(all_columns) > len(shown_columns),
         "sample_rows": sample_rows,
