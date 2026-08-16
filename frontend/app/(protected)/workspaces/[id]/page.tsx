@@ -7,7 +7,7 @@ import { getToken } from '@/lib/auth'
 import { useUser } from '@/lib/user-context'
 import type {
   Dataset, AnalysisJob, Workspace, WorkspaceInvite, WorkspaceMember, KMPreflightResponse,
-  DatasetInspect,
+  DatasetInspect, AnalysisPreflightResponse,
 } from '@/lib/types'
 import ResultPanel from '@/components/analysis/ResultPanel'
 import DatasetInspector from '@/components/analysis/DatasetInspector'
@@ -17,6 +17,10 @@ import {
 import KMConfigForm, {
   EMPTY_KM_CONFIG, kmConfigToParams, type KMConfig,
 } from '@/components/analysis/KMConfigForm'
+import AnalysisConfigForm, {
+  EMPTY_ANALYSIS_CONFIG, analysisConfigToParams,
+  type AnalysisConfig, type AnalysisJobType,
+} from '@/components/analysis/AnalysisConfigForm'
 
 type JobType = 'kaplan_meier' | 'descriptive_stats' | 'regression' | 'logistic_regression'
 
@@ -38,56 +42,6 @@ const JOB_TYPE_DESCRIPTIONS: Record<JobType, string> = {
   descriptive_stats: 'Summary statistics: mean, median, std, quartiles per column',
   regression: 'Ordinary least squares regression with feature coefficients and R²',
   logistic_regression: 'Binary outcome classification with odds ratios and confusion matrix',
-}
-
-const FIELD_CONFIG: Record<JobType, { key: string; label: string; placeholder: string; optional?: boolean }[]> = {
-  kaplan_meier: [
-    { key: 'time_column', label: 'Time Column', placeholder: 'e.g. survival_months' },
-    { key: 'event_column', label: 'Event Column', placeholder: 'e.g. event_occurred' },
-    { key: 'group_column', label: 'Group Column', placeholder: 'e.g. treatment_arm', optional: true },
-    { key: 'max_groups', label: 'Max Groups', placeholder: 'e.g. 60 — leave blank for default (server max: 100)', optional: true },
-  ],
-  descriptive_stats: [{ key: 'columns', label: 'Columns', placeholder: 'e.g. age, stage', optional: true }],
-  regression: [
-    { key: 'target_column', label: 'Target Column', placeholder: 'e.g. survival_months' },
-    { key: 'feature_columns', label: 'Feature Columns', placeholder: 'e.g. tumor_size' },
-  ],
-  logistic_regression: [
-    { key: 'target_column', label: 'Target Column', placeholder: 'e.g. survival_status' },
-    { key: 'feature_columns', label: 'Feature Columns', placeholder: 'e.g. age, tumor_size' },
-  ],
-}
-
-function AnalysisParamFields({
-  jobType,
-  params,
-  setParams,
-}: {
-  jobType: JobType
-  params: Record<string, string>
-  setParams: (p: Record<string, string>) => void
-}) {
-  return (
-    <div className='flex flex-col gap-4'>
-      {FIELD_CONFIG[jobType].map((f) => {
-        if (f.key === 'max_groups' && !params['group_column']) return null
-        return (
-          <div key={f.key}>
-            <label className='field-label'>
-              {f.label}
-              {f.optional && <span style={{ opacity: 0.5 }}> (optional)</span>}
-            </label>
-            <input
-              className='field-input'
-              value={params[f.key] ?? ''}
-              onChange={(e) => setParams({ ...params, [f.key]: e.target.value })}
-              placeholder={f.placeholder}
-            />
-          </div>
-        )
-      })}
-    </div>
-  )
 }
 
 function StatusBadge({ status }: { status: AnalysisJob['status'] }) {
@@ -129,10 +83,13 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
 
   // Test selection (left panel)
   const [selectedTest, setSelectedTest] = useState<JobType | null>(null)
-  const [jobParams, setJobParams] = useState<Record<string, string>>({})
   // Kaplan-Meier uses a dedicated censoring-aware flow with a preflight gate.
   const [kmConfig, setKmConfig] = useState<KMConfig>(EMPTY_KM_CONFIG)
   const [kmPreflight, setKmPreflight] = useState<KMPreflightResponse | null>(null)
+  // The other three analyses share one role-selection flow, also gated on a
+  // backend preflight rather than submitted blind from free-text boxes.
+  const [analysisConfig, setAnalysisConfig] = useState<AnalysisConfig>(EMPTY_ANALYSIS_CONFIG)
+  const [analysisPreflight, setAnalysisPreflight] = useState<AnalysisPreflightResponse | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
 
@@ -178,9 +135,10 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
   }, [id])
 
   useEffect(() => {
-    setJobParams({})
     setKmConfig(EMPTY_KM_CONFIG)
     setKmPreflight(null)
+    setAnalysisConfig(EMPTY_ANALYSIS_CONFIG)
+    setAnalysisPreflight(null)
     setRightJobId(null)
   }, [selectedTest])
 
@@ -188,6 +146,8 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
     // A different dataset invalidates any column selection and preflight.
     setKmConfig(EMPTY_KM_CONFIG)
     setKmPreflight(null)
+    setAnalysisConfig(EMPTY_ANALYSIS_CONFIG)
+    setAnalysisPreflight(null)
     setRightJobId(null)
   }, [selectedDatasetId])
 
@@ -375,22 +335,23 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
   async function handleRunAnalysis(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault()
     if (!selectedTest || !selectedDatasetId) return
+    // A disabled button is not the gate — Enter in a text field and any
+    // programmatic submit reach this handler directly. Refuse here too, so a
+    // configuration that has not been validated since its last edit cannot be
+    // submitted by a route that skips the button.
+    if (!runGate.ready) {
+      setSubmitError(runGate.reason ?? 'Validate the configuration first.')
+      return
+    }
     setSubmitting(true)
     setSubmitError(null)
     try {
-      let parameters: Record<string, unknown> = {}
-      if (selectedTest === 'kaplan_meier') {
-        // Typed KM parameters (mapping values keep their original JSON types).
-        parameters = kmConfigToParams(kmConfig)
-      } else {
-        for (const [k, v] of Object.entries(jobParams)) {
-          if (k.endsWith('_columns') || k === 'columns') {
-            parameters[k] = v.split(',').map((s) => s.trim()).filter(Boolean)
-          } else {
-            parameters[k] = v
-          }
-        }
-      }
+      // Both paths send typed parameters built from real column names. The
+      // old free-text path split strings on commas, so a typo or a stray
+      // space reached the backend as a validation error after submission.
+      const parameters = selectedTest === 'kaplan_meier'
+        ? kmConfigToParams(kmConfig)
+        : analysisConfigToParams(selectedTest as AnalysisJobType, analysisConfig)
       const job = await apiFetch<AnalysisJob>(
         `/api/workspaces/${id}/datasets/${selectedDatasetId}/analysis`,
         { method: 'POST', body: JSON.stringify({ job_type: selectedTest, parameters }) },
@@ -494,6 +455,17 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
   }
 
   const selectedDataset = datasets.find((d) => d.id === selectedDatasetId) ?? null
+
+  // Every analysis is now gated on a backend preflight, not just Kaplan-Meier.
+  // The gate is UX: it stops a submission the backend would reject anyway, and
+  // the run re-validates the same configuration regardless. For logistic
+  // regression `ready` is also false until the outcome has been confirmed,
+  // because the backend reports that as a blocker.
+  const runGate: { ready: boolean; reason?: string } = !selectedTest
+    ? { ready: false, reason: 'Select an analysis type' }
+    : (selectedTest === 'kaplan_meier' ? kmPreflight?.ready : analysisPreflight?.ready)
+      ? { ready: true }
+      : { ready: false, reason: 'Validate the configuration first' }
   const testJobs = selectedTest && selectedDatasetId
     ? jobs.filter((j) => j.job_type === selectedTest && j.dataset_id === selectedDatasetId)
     : []
@@ -738,19 +710,24 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
                     setPreflight={setKmPreflight}
                   />
                 ) : (
-                  <AnalysisParamFields jobType={selectedTest} params={jobParams} setParams={setJobParams} />
+                  <AnalysisConfigForm
+                    workspaceId={id}
+                    datasetId={selectedDatasetId}
+                    jobType={selectedTest as AnalysisJobType}
+                    columns={datasetColumns}
+                    config={analysisConfig}
+                    setConfig={setAnalysisConfig}
+                    preflight={analysisPreflight}
+                    setPreflight={setAnalysisPreflight}
+                  />
                 )}
                 {submitError && <div className="alert-error">{submitError}</div>}
                 <div>
                   <button
                     type="submit"
-                    disabled={submitting || (selectedTest === 'kaplan_meier' && !kmPreflight?.ready)}
+                    disabled={submitting || !runGate.ready}
                     className="btn btn-primary"
-                    title={
-                      selectedTest === 'kaplan_meier' && !kmPreflight?.ready
-                        ? 'Validate the configuration first'
-                        : undefined
-                    }
+                    title={runGate.ready ? undefined : runGate.reason}
                   >
                     {submitting ? <><span className="spinner" /> Running…</> : 'Run analysis'}
                   </button>

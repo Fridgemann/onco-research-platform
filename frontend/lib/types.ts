@@ -190,6 +190,69 @@ export interface KMResultData {
   assumptions: string[]
 }
 
+// ── Non-KM analysis preflight (Milestone 4, Slice 5) ────────────────────────
+// Shapes mirror AnalysisPreflightResponse exactly. Kaplan-Meier keeps its own
+// endpoint and its own types above; nothing here touches them.
+
+/** A typed value keeps its original JSON type — numeric 1 is not string "1". */
+export type AnalysisRawValue = boolean | number | string | null
+
+export interface AnalysisTypedValue {
+  value: AnalysisRawValue
+  value_type: string
+}
+
+export interface AnalysisClassCount extends AnalysisTypedValue {
+  count: number
+}
+
+/** Optional display label for one outcome class. Never changes the fit. */
+export interface AnalysisClassLabel extends AnalysisTypedValue {
+  label: string
+}
+
+export interface AnalysisPreflightColumn {
+  name: string
+  role: string
+  missing: number
+  non_numeric: number
+  normalized: number
+}
+
+/** Joint-row accounting (linear + logistic): every selected column must be
+ *  usable on the same row. Per-reason counts may overlap; excluded_rows
+ *  counts each excluded row once. */
+export interface AnalysisJointCounts {
+  total_rows: number
+  used_rows: number
+  excluded_rows: number
+  exclusions: Record<string, number>
+}
+
+/** Descriptive statistics compute each column on its own usable rows, so
+ *  counts are per column and never collapsed into a joint pair. */
+export interface AnalysisColumnCounts {
+  used_rows: number
+  excluded_rows: number
+  missing_rows: number
+  non_numeric_rows: number
+}
+
+export interface AnalysisPreflightResponse {
+  job_type: string
+  ready: boolean
+  blockers: string[]
+  counts: AnalysisJointCounts | null
+  counts_by_column: Record<string, AnalysisColumnCounts> | null
+  columns: AnalysisPreflightColumn[]
+  /** Logistic only: exactly the usable outcome classes. */
+  target_classes: AnalysisClassCount[] | null
+  /** A hint the UI may show but must never apply on the researcher's behalf. */
+  suggested_positive_class: AnalysisTypedValue | null
+  /** Echo of a submitted selection once the backend has revalidated it. */
+  positive_class: AnalysisTypedValue | null
+}
+
 // ── Dataset inspection (Milestone 4) ────────────────────────────────────────
 
 export type DatasetDisplayType = 'numeric' | 'categorical' | 'binary' | 'empty'
