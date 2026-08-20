@@ -7,6 +7,8 @@ import DescriptiveStatsTable from './DescriptiveStatsTable'
 import RegressionResult from './RegressionResult'
 import LogisticRegressionResult from './LogisticRegressionResult'
 import ProcessingReport, { type ColumnProcessing } from './ProcessingReport'
+import MethodExplainer from './MethodExplainer'
+import type { AnalysisClassLabel, AnalysisTypedValue } from '@/lib/types'
 
 type Meta = { total_rows: number; used_rows: number; dropped_rows: number }
 type DescriptiveColumnStats = { missing?: number; non_numeric?: number }
@@ -73,6 +75,17 @@ function ResultPanelInner({ job }: { job: AnalysisJob }) {
       ? <ProcessingReport meta={meta} processing={processing} />
       : <DroppedRowsWarning meta={meta} />
 
+  // Logistic records which outcome the run was oriented to; the explainer
+  // reads those recorded fields so its prose names the same outcome the
+  // numbers describe. Nothing is re-derived here.
+  const positiveClass = (result.positive_class as AnalysisTypedValue | undefined) ?? null
+  const classLabels = (result.class_labels as AnalysisClassLabel[] | undefined) ?? []
+  const positiveClassConfirmed = result.positive_class_confirmed === true
+  // Which numbers a result contains depends on the result itself: a
+  // single-predictor regression reports a p-value and standard error, a
+  // multi-predictor one does not.
+  const resultType = typeof result.type === 'string' ? result.type : null
+
   return (
     <>
       {preludeReport}
@@ -97,6 +110,18 @@ function ResultPanelInner({ job }: { job: AnalysisJob }) {
             )
         }
       })()}
+
+      {/* Kaplan-Meier is deliberately excluded: it already carries its own
+          curve guide, assumptions, and reproducibility block from M3. */}
+      {job.job_type !== 'kaplan_meier' && (
+        <MethodExplainer
+          jobType={job.job_type}
+          resultType={resultType}
+          positiveClass={positiveClass}
+          classLabels={classLabels}
+          positiveClassConfirmed={positiveClassConfirmed}
+        />
+      )}
     </>
   )
 }

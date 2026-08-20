@@ -41,7 +41,7 @@ const JOB_TYPE_DESCRIPTIONS: Record<JobType, string> = {
   kaplan_meier: 'Estimate survival function over time with optional group stratification',
   descriptive_stats: 'Summary statistics: mean, median, std, quartiles per column',
   regression: 'Ordinary least squares regression with feature coefficients and R²',
-  logistic_regression: 'Binary outcome classification with odds ratios and confusion matrix',
+  logistic_regression: 'Estimate the probability of a two-value outcome from numeric predictors',
 }
 
 function StatusBadge({ status }: { status: AnalysisJob['status'] }) {

@@ -4,6 +4,8 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ReferenceLine, ResponsiveContainer, Cell,
 } from 'recharts'
+import { formatClassValue, sameClass } from '@/lib/analysis'
+import type { AnalysisClassCount, AnalysisClassLabel, AnalysisTypedValue } from '@/lib/types'
 
 type LogisticData = {
   type: 'logistic'
@@ -15,10 +17,48 @@ type LogisticData = {
   auc: number | null
   n: number
   classes: (string | number)[]
+  // Recorded by the run since M4: the typed classes, the confirmed outcome,
+  // and any names the researcher gave them. Optional so results stored before
+  // M4 still render.
+  target_classes?: AnalysisClassCount[]
+  class_labels?: AnalysisClassLabel[]
+  positive_class?: AnalysisTypedValue | null
+  positive_class_confirmed?: boolean
+}
+
+/** The researcher's name for a class, matched on type AND value so numeric 1
+ *  and string "1" are never treated as the same class. */
+function labelFor(
+  cls: AnalysisTypedValue,
+  labels: AnalysisClassLabel[],
+): string | null {
+  return labels.find((l) => sameClass(l, cls))?.label ?? null
+}
+
+/** "0 — no recurrence" when a name was given, otherwise just the raw value.
+ *  The raw value always stays visible so a result can be traced back to the
+ *  data it came from. */
+function describeClass(cls: AnalysisTypedValue, labels: AnalysisClassLabel[]): string {
+  const raw = formatClassValue(cls.value, cls.value_type)
+  const label = labelFor(cls, labels)
+  return label ? `${raw} — ${label}` : raw
 }
 
 export default function LogisticRegressionResult({ data }: { data: LogisticData }) {
   const chartData = Object.entries(data.coefficients).map(([feature, value]) => ({ feature, value }))
+
+  const labels = data.class_labels ?? []
+  const typedClasses = data.target_classes ?? null
+  // Typed classes keep 1 and "1" apart; the flat `classes` list is the
+  // pre-M4 fallback and can only be shown as-is.
+  const classesDisplay = typedClasses
+    ? typedClasses.map((c) => describeClass(c, labels)).join(', ')
+    : data.classes.join(', ')
+
+  const outcome = data.positive_class && data.positive_class_confirmed
+    ? (labelFor(data.positive_class, labels)
+      ?? formatClassValue(data.positive_class.value, data.positive_class.value_type))
+    : null
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -26,12 +66,21 @@ export default function LogisticRegressionResult({ data }: { data: LogisticData 
         <Metric label="Accuracy" value={(data.accuracy * 100).toFixed(1) + '%'} />
         <Metric label="AUC" value={data.auc !== null ? data.auc.toFixed(3) : 'N/A'} highlight={data.auc !== null && data.auc >= 0.7} />
         <Metric label="N" value={String(data.n)} />
-        <Metric label="Classes" value={data.classes.join(', ')} />
+        <Metric label="Classes" value={classesDisplay} />
       </div>
 
       <div>
-        <p style={{ fontSize: '10px', color: '#7a8399', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '12px', fontFamily: 'var(--font-mono)' }}>
-          Feature coefficients — positive raises probability, negative lowers it
+        <p style={{ fontSize: '10px', color: '#7a8399', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '4px', fontFamily: 'var(--font-mono)' }}>
+          Feature coefficients
+        </p>
+        {/* Name the outcome the directions refer to. "Raises probability" is
+            meaningless without saying probability of what. */}
+        <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '12px', lineHeight: 1.6 }}>
+          {outcome
+            ? `Positive coefficients increase the estimated probability of ${outcome}; negative coefficients decrease it, holding other predictors constant.`
+            : 'Positive coefficients increase the estimated probability of the modelled outcome; negative coefficients decrease it, holding other predictors constant.'}
+          {' '}These are associations within the rows analysed, not evidence that changing a
+          predictor would change the outcome.
         </p>
         <ResponsiveContainer width="100%" height={Math.min(Math.max(120, chartData.length * 40), 800)}>
           <BarChart data={chartData} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
