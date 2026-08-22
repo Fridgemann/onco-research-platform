@@ -63,6 +63,58 @@ export function analysisConfigToParams(
   return params
 }
 
+/**
+ * Rebuild a form configuration from a stored run's parameters (Slice 7).
+ *
+ * The outcome selection and its labels keep their original JSON types, so a
+ * run submitted for numeric 1 reopens as numeric 1 and never collapses into
+ * string "1" — the reopened form must describe the same run. Unreadable
+ * entries are dropped rather than guessed.
+ */
+export function paramsToAnalysisConfig(
+  jobType: AnalysisJobType,
+  params: Record<string, unknown> | null,
+): AnalysisConfig {
+  if (!params) return EMPTY_ANALYSIS_CONFIG
+
+  const strings = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+
+  // The value must BE the type it claims: a class recorded as {value: "1",
+  // value_type: "number"} is malformed, and reopening it would describe an
+  // outcome the run never modelled. Null belongs to no type, and a non-finite
+  // number is not a class value either.
+  const typedValue = (v: unknown): AnalysisTypedValue | null => {
+    if (!v || typeof v !== 'object') return null
+    const e = v as Record<string, unknown>
+    const t = e.value_type
+    const value = e.value
+    if (t === 'boolean' && typeof value === 'boolean') return { value, value_type: t }
+    if (t === 'number' && typeof value === 'number' && Number.isFinite(value)) {
+      return { value, value_type: t }
+    }
+    if (t === 'string' && typeof value === 'string') return { value, value_type: t }
+    return null
+  }
+
+  const class_labels: AnalysisClassLabel[] = (
+    Array.isArray(params.class_labels) ? params.class_labels : []
+  ).flatMap((entry) => {
+    const typed = typedValue(entry)
+    const label = (entry as Record<string, unknown>)?.label
+    if (!typed || typeof label !== 'string' || !label) return []
+    return [{ ...typed, label }]
+  })
+
+  return {
+    columns: jobType === 'descriptive_stats' ? strings(params.columns) : [],
+    target_column: typeof params.target_column === 'string' ? params.target_column : '',
+    feature_columns: strings(params.feature_columns),
+    positive_class: jobType === 'logistic_regression' ? typedValue(params.positive_class) : null,
+    class_labels: jobType === 'logistic_regression' ? class_labels : [],
+  }
+}
+
 /** Whether the form has enough filled in to be worth validating. */
 function canValidate(jobType: AnalysisJobType, cfg: AnalysisConfig): boolean {
   if (jobType === 'descriptive_stats') return true

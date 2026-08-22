@@ -1,7 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useState, use, useRef } from 'react'
+import { Suspense, useCallback, useEffect, useState, use, useRef } from 'react'
 import Link from 'next/link'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { apiFetch, ApiError } from '@/lib/api'
 import { getToken } from '@/lib/auth'
 import { useUser } from '@/lib/user-context'
@@ -10,15 +11,16 @@ import type {
   DatasetInspect, AnalysisPreflightResponse,
 } from '@/lib/types'
 import ResultPanel from '@/components/analysis/ResultPanel'
+import { formatClassValue } from '@/lib/analysis'
 import DatasetInspector from '@/components/analysis/DatasetInspector'
 import {
   fetchDatasetInspect, checkUploadFile, UPLOAD_ACCEPT, UPLOAD_MAX_LABEL,
 } from '@/lib/datasets'
 import KMConfigForm, {
-  EMPTY_KM_CONFIG, kmConfigToParams, type KMConfig,
+  EMPTY_KM_CONFIG, kmConfigToParams, paramsToKmConfig, type KMConfig,
 } from '@/components/analysis/KMConfigForm'
 import AnalysisConfigForm, {
-  EMPTY_ANALYSIS_CONFIG, analysisConfigToParams,
+  EMPTY_ANALYSIS_CONFIG, analysisConfigToParams, paramsToAnalysisConfig,
   type AnalysisConfig, type AnalysisJobType,
 } from '@/components/analysis/AnalysisConfigForm'
 
@@ -44,6 +46,49 @@ const JOB_TYPE_DESCRIPTIONS: Record<JobType, string> = {
   logistic_regression: 'Estimate the probability of a two-value outcome from numeric predictors',
 }
 
+/**
+ * One line describing what a past run was configured to do, so a list of
+ * timestamps becomes a list of distinguishable runs.
+ *
+ * Reads only the parameters the run was submitted with — column names and
+ * outcome labels the member already chose. None of this goes into the URL.
+ */
+function describeRun(job: AnalysisJob): string | null {
+  const params = (job.parameters ?? null) as Record<string, unknown> | null
+
+  // Describe the run through the SAME converters that reopen it, so a row can
+  // never advertise a mapping or outcome label the form would refuse. A
+  // malformed stored value is dropped in both places or in neither.
+  if (job.job_type === 'kaplan_meier') {
+    const cfg = paramsToKmConfig(params)
+    const parts: string[] = []
+    if (cfg.time_column) parts.push(`time: ${cfg.time_column}`)
+    if (cfg.event_column) parts.push(`status: ${cfg.event_column}`)
+    if (cfg.group_column) parts.push(`grouped by ${cfg.group_column}`)
+    return parts.join(' · ') || null
+  }
+
+  const jobType = job.job_type as AnalysisJobType
+  const cfg = paramsToAnalysisConfig(jobType, params)
+
+  if (jobType === 'descriptive_stats') {
+    return cfg.columns.length ? `columns: ${cfg.columns.join(', ')}` : 'all numeric columns'
+  }
+
+  const parts: string[] = []
+  if (cfg.target_column) parts.push(`outcome: ${cfg.target_column}`)
+  if (cfg.feature_columns.length) parts.push(`predictors: ${cfg.feature_columns.join(', ')}`)
+
+  if (jobType === 'logistic_regression' && cfg.positive_class) {
+    const pc = cfg.positive_class
+    const named = cfg.class_labels.find(
+      (l) => l.value_type === pc.value_type && Object.is(l.value, pc.value),
+    )?.label
+    parts.push(`predicting: ${named || formatClassValue(pc.value, pc.value_type)}`)
+  }
+  return parts.join(' · ') || null
+}
+
 function StatusBadge({ status }: { status: AnalysisJob['status'] }) {
   return (
     <span className={`badge badge-${status}`}>
@@ -53,7 +98,7 @@ function StatusBadge({ status }: { status: AnalysisJob['status'] }) {
   )
 }
 
-export default function WorkspacePage({ params }: { params: Promise<{ id: string }> }) {
+function WorkspaceView({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
   const [workspace, setWorkspace] = useState<Workspace | null>(null)
   const [datasets, setDatasets] = useState<Dataset[]>([])
@@ -112,6 +157,9 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
   const [confirmLeave, setConfirmLeave] = useState(false)
 
   const currentUser = useUser()
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const pathname = `/workspaces/${id}`
 
   useEffect(() => {
     async function load() {
@@ -124,7 +172,8 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
         setWorkspace(ws)
         setDatasets(ds)
         setJobs(js)
-        if (ds.length > 0) setSelectedDatasetId(ds[0].id)
+        // Selection comes from the URL effect below, which falls back to the
+        // first dataset when the query string names none.
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'Failed to load workspace')
       } finally {
@@ -134,22 +183,172 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
     load()
   }, [id])
 
-  useEffect(() => {
+  /** Clear every configuration and gate. Called whenever the thing the
+   *  configuration describes changes underneath it. */
+  const resetConfiguration = useCallback(() => {
     setKmConfig(EMPTY_KM_CONFIG)
     setKmPreflight(null)
     setAnalysisConfig(EMPTY_ANALYSIS_CONFIG)
     setAnalysisPreflight(null)
-    setRightJobId(null)
-  }, [selectedTest])
+  }, [])
+
+  // ── Revisit: URL carries the selection, and nothing else ──────────────────
+  //
+  // Only these three keys ever appear, and the query string is rebuilt from
+  // them rather than copied from the incoming URL. Column names, mappings,
+  // outcome labels and cell values stay out of it: a URL is pasted into
+  // tickets and chat logs, and none of that is ours to leak. Rebuilding also
+  // means an unknown key someone appended cannot survive a click.
+  type Selection = { dataset: string | null; analysis: string | null; job: string | null }
+
+  const buildHref = useCallback((sel: Selection) => {
+    const sp = new URLSearchParams()
+    if (sel.dataset) sp.set('dataset', sel.dataset)
+    if (sel.analysis) sp.set('analysis', sel.analysis)
+    if (sel.job) sp.set('job', sel.job)
+    const qs = sp.toString()
+    return qs ? `${pathname}?${qs}` : pathname
+  }, [pathname])
+
+  // The selection the page intends, updated synchronously. Consecutive
+  // changes (pick a dataset, then immediately an analysis) merge against this
+  // rather than against useSearchParams, which still holds the pre-navigation
+  // value until the router commits — merging against that dropped the first
+  // change.
+  const selectionRef = useRef<Selection>({ dataset: null, analysis: null, job: null })
+
+  const pushSelection = useCallback((next: Partial<Selection>, replace = false) => {
+    const merged: Selection = { ...selectionRef.current, ...next }
+    selectionRef.current = merged
+    const href = buildHref(merged)
+    if (replace) router.replace(href, { scroll: false })
+    else router.push(href, { scroll: false })
+  }, [router, buildHref])
+
+  function selectDataset(datasetId: string) {
+    // Different dataset means different columns: the configuration that
+    // described the old one cannot be carried over.
+    resetConfiguration()
+    pushSelection({ dataset: datasetId, job: null })
+  }
+
+  function selectAnalysis(type: JobType) {
+    resetConfiguration()
+    pushSelection({ analysis: type, job: null })
+  }
+
+  function openJob(jobId: string | null) {
+    pushSelection({ job: jobId })
+  }
+
+  // Apply the URL to state. This is also what makes Back and Forward work:
+  // the browser changes the query string, and this reapplies it.
+  const urlDataset = searchParams.get('dataset')
+  const urlAnalysis = searchParams.get('analysis')
+  const urlJob = searchParams.get('job')
+  const searchString = searchParams.toString()
+  const rehydratedJobRef = useRef<string | null>(null)
+
+  // What was last applied, so a change of dataset or analysis is detected no
+  // matter how it arrived: a click, a typed URL, Back, or Forward.
+  const appliedRef = useRef<{ dataset: string | null; analysis: JobType | null }>({
+    dataset: null, analysis: null,
+  })
 
   useEffect(() => {
-    // A different dataset invalidates any column selection and preflight.
-    setKmConfig(EMPTY_KM_CONFIG)
-    setKmPreflight(null)
-    setAnalysisConfig(EMPTY_ANALYSIS_CONFIG)
-    setAnalysisPreflight(null)
-    setRightJobId(null)
-  }, [selectedDatasetId])
+    if (loading) return
+
+    // Resolve the three ids together — a job only means something with the
+    // dataset and analysis it belongs to.
+    //
+    // Supplied-but-wrong is treated differently from absent. If the caller
+    // named a dataset or analysis and it is invalid or disagrees with the
+    // job, the job is dropped: the URL asked for two different things and
+    // guessing which one was meant would open a run the caller did not name.
+    // If they are absent, a valid job supplies both.
+    const datasetSupplied = urlDataset !== null
+    const analysisSupplied = urlAnalysis !== null
+
+    const validDataset = datasets.find((d) => d.id === urlDataset)?.id ?? null
+    // Object.hasOwn, not `in`: `in` walks the prototype chain, so "toString",
+    // "constructor" and "__proto__" would all pass as analysis types.
+    const validAnalysis = urlAnalysis && Object.hasOwn(JOB_TYPE_LABELS, urlAnalysis)
+      ? (urlAnalysis as JobType)
+      : null
+
+    // Ownership first: a job from another workspace is not visible here at
+    // all. Mismatches are dropped rather than reported — a wrong id must not
+    // become a lookup oracle.
+    const candidate = jobs.find((x) => x.id === urlJob && x.workspace_id === id) ?? null
+    const jobConflicts = !!candidate && (
+      (datasetSupplied && (!validDataset || candidate.dataset_id !== validDataset))
+      || (analysisSupplied && (!validAnalysis || candidate.job_type !== validAnalysis))
+      // A job whose own dataset is gone cannot be opened either.
+      || !datasets.some((d) => d.id === candidate.dataset_id)
+      || !Object.hasOwn(JOB_TYPE_LABELS, candidate.job_type)
+    )
+    const job = jobConflicts ? null : candidate
+
+    // A surviving job supplies whatever the URL left out.
+    const nextDataset = validDataset
+      ?? job?.dataset_id
+      ?? (datasets.length ? datasets[0].id : '')
+    const analysis = validAnalysis ?? (job ? (job.job_type as JobType) : null)
+
+    if (nextDataset !== selectedDatasetId) setSelectedDatasetId(nextDataset)
+    if (analysis !== selectedTest) setSelectedTest(analysis)
+    if ((job?.id ?? null) !== rightJobId) setRightJobId(job?.id ?? null)
+
+    const resolved: Selection = {
+      dataset: nextDataset || null,
+      analysis,
+      job: job?.id ?? null,
+    }
+    selectionRef.current = resolved
+
+    // Canonicalise. Rebuilding from the allowlist drops unknown keys,
+    // repeated values, an analysis type that does not exist, and a job that
+    // does not belong with the rest — so the address bar always describes
+    // what is on screen, and a job never survives without its dataset and
+    // analysis. Replace, not push: resolving a URL is not a navigation the
+    // researcher made.
+    const canonical = buildHref(resolved)
+    const current = searchString ? `${pathname}?${searchString}` : pathname
+    if (canonical !== current) router.replace(canonical, { scroll: false })
+
+    // A different dataset or analysis invalidates everything the form holds:
+    // the columns, any mapping or outcome, and the preflight approval. Clear
+    // first, then rehydrate only if a valid job remains — otherwise the form
+    // is blank, which is the honest state for "no run selected".
+    const contextChanged = appliedRef.current.dataset !== nextDataset
+      || appliedRef.current.analysis !== analysis
+    if (contextChanged) {
+      appliedRef.current = { dataset: nextDataset, analysis }
+      rehydratedJobRef.current = null
+      resetConfiguration()
+    }
+
+    // Reopening a run restores the configuration it was submitted with —
+    // once per job, so it never overwrites edits made afterwards.
+    if (job && rehydratedJobRef.current !== job.id) {
+      rehydratedJobRef.current = job.id
+      const params = (job.parameters ?? null) as Record<string, unknown> | null
+      if (job.job_type === 'kaplan_meier') {
+        setKmConfig(paramsToKmConfig(params))
+        setAnalysisConfig(EMPTY_ANALYSIS_CONFIG)
+      } else {
+        setAnalysisConfig(paramsToAnalysisConfig(job.job_type as AnalysisJobType, params))
+        setKmConfig(EMPTY_KM_CONFIG)
+      }
+      // A reopened configuration carries no approval from the run it came
+      // from: submitting again requires a fresh preflight against the data as
+      // it is now.
+      setKmPreflight(null)
+      setAnalysisPreflight(null)
+    }
+    if (!job) rehydratedJobRef.current = null
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, datasets, jobs, urlDataset, urlAnalysis, urlJob, searchString, id])
 
   const loadInspect = useCallback(() => {
     if (!selectedDatasetId) return
@@ -321,7 +520,7 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
       }
       const ds = await res.json() as Dataset
       setDatasets((prev) => [ds, ...prev])
-      setSelectedDatasetId(ds.id)
+      selectDataset(ds.id)
       setShowUpload(false)
       setUploadFile(null)
       setUploadDesc('')
@@ -357,7 +556,8 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
         { method: 'POST', body: JSON.stringify({ job_type: selectedTest, parameters }) },
       )
       setJobs((prev) => [job, ...prev])
-      setRightJobId(job.id)
+      // A new run becomes the opened one, so a refresh returns to it.
+      openJob(job.id)
     } catch (err) {
       setSubmitError(err instanceof ApiError ? err.message : 'Failed to submit job')
     } finally {
@@ -369,11 +569,22 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
     setDeletingDataset(datasetId)
     try {
       await apiFetch(`/api/workspaces/${id}/datasets/${datasetId}`, { method: 'DELETE' })
-      setDatasets((prev) => {
-        const next = prev.filter((d) => d.id !== datasetId)
-        if (selectedDatasetId === datasetId) setSelectedDatasetId(next[0]?.id ?? '')
-        return next
-      })
+      // Functional update, so a dataset uploaded while the delete was in
+      // flight is not overwritten by a list captured before it existed. The
+      // updater stays pure — React may run it more than once — and the
+      // navigation below is a side effect done once, outside it.
+      setDatasets((prev) => prev.filter((d) => d.id !== datasetId))
+
+      if (selectedDatasetId === datasetId) {
+        resetConfiguration()
+        // A best-effort next selection from what this handler can see. If it
+        // is already stale, URL resolution canonicalises to a dataset that
+        // really exists on the next pass.
+        const fallback = datasets.find((d) => d.id !== datasetId)?.id ?? null
+        // Replace rather than push: the deleted dataset must not remain a
+        // Back destination.
+        pushSelection({ dataset: fallback, job: null }, true)
+      }
       setConfirmDeleteDs(null)
     } catch {
       // ignore
@@ -539,7 +750,7 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
         ) : (
           <select
             value={selectedDatasetId}
-            onChange={(e) => setSelectedDatasetId(e.target.value)}
+            onChange={(e) => selectDataset(e.target.value)}
             className="field-select"
             style={{ minWidth: '200px', maxWidth: '420px' }}
           >
@@ -615,7 +826,7 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
             return (
               <button
                 key={k}
-                onClick={() => setSelectedTest(k)}
+                onClick={() => selectAnalysis(k)}
                 style={{
                   display: 'block',
                   width: '100%',
@@ -820,7 +1031,7 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
                     {testJobs.map((job) => (
                       <div
                         key={job.id}
-                        onClick={() => setRightJobId(rightJobId === job.id ? null : job.id)}
+                        onClick={() => openJob(rightJobId === job.id ? null : job.id)}
                         style={{
                           display: 'flex',
                           alignItems: 'center',
@@ -834,12 +1045,22 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
                         }}
                       >
                         <StatusBadge status={job.status} />
-                        <span className="mono-sm" style={{ flex: 1 }}>
-                          {new Date(job.created_at).toLocaleString('en-GB', {
-                            day: 'numeric', month: 'short', year: 'numeric',
-                            hour: '2-digit', minute: '2-digit',
-                          })}
-                        </span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <span className="mono-sm">
+                            {new Date(job.created_at).toLocaleString('en-GB', {
+                              day: 'numeric', month: 'short', year: 'numeric',
+                              hour: '2-digit', minute: '2-digit',
+                            })}
+                          </span>
+                          {describeRun(job) && (
+                            <p style={{
+                              fontSize: '10px', color: 'var(--text-secondary)',
+                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            }}>
+                              {describeRun(job)}
+                            </p>
+                          )}
+                        </div>
                         {job.status === 'completed' && job.result && (
                           <span style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>
                             {rightJobId === job.id ? 'showing ↑' : 'view'}
@@ -1093,5 +1314,23 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
         </div>
       )}
     </div>
+  )
+}
+
+// useSearchParams makes this component client-rendered up to the nearest
+// Suspense boundary. Without one the whole page has nothing to fall back to
+// and renders blank when the router suspends — visible when the browser
+// restores this page from a Back navigation across full page loads.
+export default function WorkspacePage({ params }: { params: Promise<{ id: string }> }) {
+  return (
+    <Suspense
+      fallback={
+        <div style={{ padding: '24px' }}>
+          <div className="skeleton" style={{ width: '240px', height: '28px' }} />
+        </div>
+      }
+    >
+      <WorkspaceView params={params} />
+    </Suspense>
   )
 }

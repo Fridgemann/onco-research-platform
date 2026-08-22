@@ -62,6 +62,58 @@ export function kmConfigToParams(cfg: KMConfig): Record<string, unknown> {
   return params
 }
 
+/** Whether a value really is the type its entry claims. Rejects null and any
+ *  non-finite number, so NaN or Infinity never reopens as a mapped value. */
+function matchesType(
+  value: unknown,
+  valueType: 'boolean' | 'number' | 'string',
+): value is boolean | number | string {
+  if (valueType === 'boolean') return typeof value === 'boolean'
+  if (valueType === 'number') return typeof value === 'number' && Number.isFinite(value)
+  return typeof value === 'string'
+}
+
+/**
+ * Rebuild a form configuration from a stored run's parameters (Slice 7).
+ *
+ * Mapping values keep their original JSON type: a run submitted with numeric
+ * 1 must reopen as numeric 1, never as string "1", or the reopened form would
+ * describe a different mapping than the run it came from. Anything unreadable
+ * is dropped rather than guessed, so a malformed parameter set reopens as a
+ * blank form instead of a wrong one.
+ */
+export function paramsToKmConfig(params: Record<string, unknown> | null): KMConfig {
+  if (!params) return EMPTY_KM_CONFIG
+
+  const str = (v: unknown) => (typeof v === 'string' ? v : '')
+  const rawMapping = Array.isArray(params.event_mapping) ? params.event_mapping : []
+  const event_mapping: KMEventMappingEntry[] = rawMapping.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return []
+    const e = entry as Record<string, unknown>
+    const valueType = e.value_type
+    const role = e.role
+    if (valueType !== 'boolean' && valueType !== 'number' && valueType !== 'string') return []
+    if (role !== 'event' && role !== 'censored' && role !== 'exclude') return []
+    // The value must BE the type it claims. A "number" entry holding a string
+    // would reopen as a mapping the run never used, and null belongs to no
+    // type at all — both are dropped rather than carried.
+    const value = e.value
+    if (!matchesType(value, valueType)) return []
+    return [{ value, value_type: valueType, role }]
+  })
+
+  return {
+    time_column: str(params.time_column),
+    event_column: str(params.event_column),
+    group_column: str(params.group_column),
+    // Absent means the older default (censoring present), matching the form.
+    has_censoring: params.has_censoring !== false,
+    event_mapping,
+    all_events_confirmed: params.all_events_confirmed === true,
+    max_groups: typeof params.max_groups === 'number' ? String(params.max_groups) : '',
+  }
+}
+
 function toPreflightRequest(cfg: KMConfig): KMPreflightRequest {
   return {
     time_column: cfg.time_column,
